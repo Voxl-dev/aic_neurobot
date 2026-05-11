@@ -15,8 +15,15 @@ COPY pixi_env_setup.sh /ws_aic/src/aic/
 # Add other dependencies
 
 SHELL ["/bin/bash", "-c"]
-RUN --mount=type=cache,target=/root/.cache/rattler/cache --mount=type=cache,target=/ws_aic/src/aic/.pixi/build \
-    cd /ws_aic/src/aic && pixi install --locked
+# Cada paquete local con build-deps puede fallar una vez (hash mismatch in-session).
+# El loop acumula los artefactos estables en .pixi/bld hasta que todos son reutilizables.
+RUN --mount=type=cache,target=/ws_aic/src/aic/.pixi/bld,sharing=locked \
+    cd /ws_aic/src/aic && \
+    for i in 1 2 3 4 5 6 7 8; do \
+        echo "=== pixi install pass $i ===" ; \
+        pixi install --locked && break || true ; \
+    done && \
+    pixi install --locked
 
 WORKDIR /ws_aic/src/aic
 COPY --chmod=755 <<"EOF" /entrypoint.sh
@@ -55,6 +62,8 @@ export ZENOH_CONFIG_OVERRIDE
 echo "ZENOH_CONFIG_OVERRIDE=$ZENOH_CONFIG_OVERRIDE"
 exec pixi run --as-is ros2 run aic_model aic_model "$@"
 EOF
+
+RUN sed -i 's/\r$//' /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["--ros-args", "-p", "policy:=aic_example_policies.ros.CheatCode", "-p", "use_sim_time:=true"]
