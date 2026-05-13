@@ -129,8 +129,23 @@ class RunACT(Policy):
 
         # Config
         self.image_scaling = 0.25  # Must match AICRobotAICControllerConfig
+        self.camera_data_dir = Path(
+            os.environ.get("AIC_CAMERA_OUTPUT_DIR", "aic_camera_data")
+        )
+        self.camera_frame_index = 0
+        for camera_name in ("left", "center", "right"):
+            (self.camera_data_dir / camera_name).mkdir(parents=True, exist_ok=True)
 
         self.get_logger().info("Normalization statistics loaded successfully.")
+        self.get_logger().info(f"Camera images will be saved to {self.camera_data_dir}")
+
+    @staticmethod
+    def _ros_image_to_numpy(raw_img) -> np.ndarray:
+        """Convert a ROS Image message into a uint8 HWC numpy array."""
+        img_np = np.frombuffer(raw_img.data, dtype=np.uint8).reshape(
+            raw_img.height, raw_img.width, 3
+        )
+        return img_np
 
     @staticmethod
     def _img_to_tensor(
@@ -142,9 +157,7 @@ class RunACT(Policy):
     ) -> torch.Tensor:
         """Converts ROS Image -> Resized -> Permuted -> Normalized Tensor."""
         # 1. Bytes to Numpy (H, W, C)
-        img_np = np.frombuffer(raw_img.data, dtype=np.uint8).reshape(
-            raw_img.height, raw_img.width, 3
-        )
+        img_np = RunACT._ros_image_to_numpy(raw_img)
 
         # 2. Resize
         if scale != 1.0:
@@ -165,6 +178,37 @@ class RunACT(Policy):
         # 4. Normalize (Apply Mean/Std)
         # Formula: (x - mean) / std
         return (tensor - mean) / std
+
+    def save_camera_images(self, obs_msg: Observation) -> None:
+        """Save the raw camera images from the current observation."""
+        timestamp_sec = (
+            obs_msg.center_image.header.stamp.sec
+            + obs_msg.center_image.header.stamp.nanosec / 1e9
+        )
+
+        for camera_name, raw_img in (
+            ("left", obs_msg.left_image),
+            ("center", obs_msg.center_image),
+            ("right", obs_msg.right_image),
+        ):
+            img_np = self._ros_image_to_numpy(raw_img)
+            filename = f"{self.camera_frame_index:06d}_{timestamp_sec:.9f}.png"
+            image_path = self.camera_data_dir / camera_name / filename
+            cv2.imwrite(str(image_path), cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR))
+
+            metadata = {
+                "frame_index": self.camera_frame_index,
+                "camera": camera_name,
+                "timestamp_sec": timestamp_sec,
+                "height": raw_img.height,
+                "width": raw_img.width,
+                "encoding": raw_img.encoding,
+                "path": str(image_path),
+            }
+            with open(self.camera_data_dir / "metadata.jsonl", "a") as f:
+                f.write(json.dumps(metadata) + "\n")
+
+        self.camera_frame_index += 1
 
     def prepare_observations(self, obs_msg: Observation) -> Dict[str, torch.Tensor]:
         """Convert ROS Observation message into dictionary of normalized tensors."""
@@ -258,6 +302,7 @@ class RunACT(Policy):
                 self.get_logger().info("No observation received.")
                 continue
 
+            self.save_camera_images(observation_msg)
             obs_tensors = self.prepare_observations(observation_msg)
 
             # 2. Model Inference
