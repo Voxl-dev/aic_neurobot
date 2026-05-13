@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AIC — Pipeline de Datasets y Entrenamiento</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface2: #22263a;
+      --border: #2e3350;
+      --accent: #5b8dee;
+      --accent2: #7c3aed;
+      --green: #22c55e;
+      --yellow: #f59e0b;
+      --red: #ef4444;
+      --orange: #f97316;
+      --text: #e2e8f0;
+      --text-muted: #8892aa;
+      --radius: 12px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      line-height: 1.6;
+      padding: 32px 24px;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 48px;
+    }
+
+    header h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 8px;
+    }
+
+    header p {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+    }
+
+    header .badge {
+      display: inline-block;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 4px 14px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-top: 10px;
+    }
+
+    h2 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin-bottom: 20px;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    h2::before {
+      content: '';
+      display: block;
+      width: 4px;
+      height: 22px;
+      background: linear-gradient(to bottom, var(--accent), var(--accent2));
+      border-radius: 2px;
+    }
+
+    .section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px;
+      margin-bottom: 28px;
+    }
+
+    /* ── Mermaid diagram ── */
+    .mermaid-wrap {
+      background: var(--surface2);
+      border-radius: var(--radius);
+      padding: 24px 16px;
+      overflow-x: auto;
+      text-align: center;
+    }
+
+    /* ── Dataset cards ── */
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 20px;
+    }
+
+    .card {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+    }
+
+    .card.ds-a::before { background: var(--accent); }
+    .card.ds-b::before { background: var(--green); }
+    .card.ds-c::before { background: var(--yellow); }
+    .card.ds-d::before { background: var(--orange); }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .card-icon {
+      width: 42px;
+      height: 42px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.3rem;
+      flex-shrink: 0;
+    }
+
+    .ds-a .card-icon { background: rgba(91,141,238,.18); }
+    .ds-b .card-icon { background: rgba(34,197,94,.18); }
+    .ds-c .card-icon { background: rgba(245,158,11,.18); }
+    .ds-d .card-icon { background: rgba(249,115,22,.18); }
+
+    .card-title { font-weight: 700; font-size: 1rem; }
+    .card-subtitle { font-size: 0.78rem; color: var(--text-muted); }
+
+    .card p { font-size: 0.87rem; color: var(--text-muted); margin-bottom: 14px; }
+
+    .stat-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+
+    .stat {
+      background: rgba(255,255,255,.05);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 0.78rem;
+    }
+
+    .stat span { font-weight: 700; color: var(--text); }
+
+    table.info {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+    }
+
+    table.info th {
+      text-align: left;
+      color: var(--text-muted);
+      font-weight: 500;
+      padding: 4px 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    table.info td {
+      padding: 5px 0;
+      color: var(--text);
+      border-bottom: 1px solid rgba(255,255,255,.04);
+    }
+
+    table.info td:first-child { color: var(--text-muted); width: 38%; }
+
+    /* ── Training pipeline ── */
+    .pipeline {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .pipeline-row {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 20px;
+      flex-wrap: wrap;
+    }
+
+    .pipeline-row .layer-badge {
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: #fff;
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 4px 12px;
+      border-radius: 20px;
+      white-space: nowrap;
+    }
+
+    .pipeline-row .layer-name {
+      font-weight: 600;
+      font-size: 0.95rem;
+      flex: 1;
+    }
+
+    .pipeline-row .layer-input {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+
+    .pipeline-row .layer-input code {
+      background: rgba(91,141,238,.15);
+      border: 1px solid rgba(91,141,238,.3);
+      border-radius: 4px;
+      padding: 1px 6px;
+      color: var(--accent);
+      font-family: 'Cascadia Code', 'Consolas', monospace;
+      font-size: 0.78rem;
+    }
+
+    .arrow-down {
+      text-align: center;
+      font-size: 1.2rem;
+      color: var(--text-muted);
+    }
+
+    /* ── Warnings ── */
+    .warnings { display: flex; flex-direction: column; gap: 12px; }
+
+    .warn {
+      display: flex;
+      gap: 14px;
+      align-items: flex-start;
+      background: var(--surface2);
+      border-left: 3px solid;
+      border-radius: 0 var(--radius) var(--radius) 0;
+      padding: 14px 16px;
+      font-size: 0.87rem;
+    }
+
+    .warn.red { border-color: var(--red); }
+    .warn.yellow { border-color: var(--yellow); }
+    .warn.green { border-color: var(--green); }
+    .warn.orange { border-color: var(--orange); }
+
+    .warn-icon { font-size: 1.2rem; flex-shrink: 0; margin-top: 1px; }
+    .warn strong { display: block; font-size: 0.9rem; margin-bottom: 3px; }
+    .warn p { color: var(--text-muted); margin: 0; }
+
+    .warn code {
+      background: rgba(255,255,255,.08);
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-family: 'Cascadia Code', 'Consolas', monospace;
+      font-size: 0.8rem;
+      color: var(--text);
+    }
+
+    /* ── Volume summary table ── */
+    .vol-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.87rem;
+    }
+
+    .vol-table th {
+      background: var(--surface2);
+      padding: 10px 14px;
+      text-align: left;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      border-bottom: 2px solid var(--border);
+    }
+
+    .vol-table td {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .vol-table tr:last-child td { border-bottom: none; }
+
+    .vol-table tr:hover td { background: rgba(255,255,255,.02); }
+
+    .badge-pill {
+      display: inline-block;
+      border-radius: 20px;
+      padding: 2px 10px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+
+    .pill-none { background: rgba(34,197,94,.15); color: var(--green); }
+    .pill-moderate { background: rgba(245,158,11,.15); color: var(--yellow); }
+    .pill-auto { background: rgba(91,141,238,.15); color: var(--accent); }
+
+    footer {
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.8rem;
+      margin-top: 40px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>AIC — Pipeline de Datasets y Entrenamiento</h1>
+  <p>Guía de referencia para el equipo de IA y Robótica</p>
+  <div class="badge">Qualification Phase · UR5e + Robotiq Hand-E · Cable Insertion</div>
+</header>
+
+<!-- ─────────── DIAGRAMA PRINCIPAL ─────────── -->
+<div class="section">
+  <h2>Flujo completo — de la simulación al score</h2>
+  <div class="mermaid-wrap">
+    <div class="mermaid">
+%%{init: {'theme': 'dark', 'themeVariables': {'darkMode': true, 'background': '#22263a', 'primaryColor': '#5b8dee', 'primaryTextColor': '#e2e8f0', 'primaryBorderColor': '#2e3350', 'lineColor': '#8892aa', 'secondaryColor': '#7c3aed', 'tertiaryColor': '#1a1d27', 'fontSize': '14px'}}}%%
+flowchart TD
+
+    subgraph SIM["🖥️  Gazebo  ·  ground_truth:=true"]
+        direction TB
+        GZ["aic_engine\n+ task board"]
+        TF["/tf frames\npose exacta de puertos"]
+        CC["CheatCode Policy\n(auto)"]
+        BAG["ros2 bag record\n10 topics"]
+        GZ --> TF
+        GZ --> CC --> BAG
+    end
+
+    subgraph HUMAN["👤  Teleoperation  ·  ground_truth:=false"]
+        direction TB
+        KB["Teclado cartesiano\naic_keyboard_ee"]
+        LR["lerobot-record"]
+        KB --> LR
+    end
+
+    TF -->|"proyección geométrica\nauto-labeling"| DA
+    BAG -->|"conversión\nLeRobot format"| DB
+    LR --> DC
+
+    DA["📦 Dataset A\n15 000 imágenes\n+ keypoint labels"]
+    DB["📦 Dataset B\n~1 000 episodios\nCheatCode IL"]
+    DC["📦 Dataset C\n~400 episodios\nTeleop demos"]
+
+    DB --> FILTER
+    DC --> FILTER
+    FILTER{"dist_plug_tip ≤ 5 mm\núltimos 50 frames"}
+    FILTER --> DD["📦 Dataset D\n~80 000 transiciones\nRLPD buffer"]
+
+    DA -->|"train"| T0["🧠 Capa 0\nKeypoint Estimator\nMobileNetV3-Small × 3 cams"]
+    DB -->|"70 %"| MIX(("Mezclar"))
+    DC -->|"30 %"| MIX
+    MIX -->|"train"| T2["🧠 Capa 2\nACT Policy\nResNet-18 + Transformer\nchunk_size=20  state=32D"]
+    DD -->|"init replay buffer"| T3["🧠 Capa 3\nSAC Residual\nMLP 256×256  act=3D"]
+
+    T0 --> POLICY
+    T2 --> POLICY
+    T3 --> POLICY
+    POLICY["🤖 Política Final\nKeypoint → estado 32D → ACT → SAC → FSM\n→ /aic_controller/pose_commands"]
+
+    POLICY --> DOCKER["🐳 my-solution:v1\ndocker compose up"]
+    DOCKER --> SCORE["🏆 Score AIC\nTier1 + Tier2 + Tier3\nMáx 300 pts · 3 trials"]
+
+    style DA fill:#1e3a5f,stroke:#5b8dee,color:#e2e8f0
+    style DB fill:#14532d,stroke:#22c55e,color:#e2e8f0
+    style DC fill:#451a03,stroke:#f59e0b,color:#e2e8f0
+    style DD fill:#431407,stroke:#f97316,color:#e2e8f0
+    style POLICY fill:#2e1065,stroke:#7c3aed,color:#e2e8f0
+    style DOCKER fill:#1e293b,stroke:#64748b,color:#e2e8f0
+    style SCORE fill:#1c1917,stroke:#d97706,color:#fbbf24
+    style T0 fill:#1e3a5f,stroke:#5b8dee,color:#e2e8f0
+    style T2 fill:#14532d,stroke:#22c55e,color:#e2e8f0
+    style T3 fill:#431407,stroke:#f97316,color:#e2e8f0
+    </div>
+  </div>
+</div>
+
+<!-- ─────────── CARDS DE DATASETS ─────────── -->
+<div class="section">
+  <h2>Descripción de cada dataset</h2>
+  <div class="cards">
+
+    <!-- Dataset A -->
+    <div class="card ds-a">
+      <div class="card-header">
+        <div class="card-icon">🗂️</div>
+        <div>
+          <div class="card-title">Dataset A — Keypoints</div>
+          <div class="card-subtitle">Sintético · automático · cero anotación</div>
+        </div>
+      </div>
+      <p>Imágenes de las 3 cámaras con la pose exacta del puerto relativa al TCP, obtenida de <code>/tf</code> cuando <code>ground_truth:=true</code>.</p>
+      <div class="stat-row">
+        <div class="stat"><span>~15 000</span> imágenes</div>
+        <div class="stat"><span>5 000</span> escenas</div>
+        <div class="stat"><span>3</span> cámaras</div>
+      </div>
+      <table class="info">
+        <tr><th>Campo</th><th>Detalle</th></tr>
+        <tr><td>Conector</td><td>SFP y SC por separado</td></tr>
+        <tr><td>Keypoints</td><td>8 puntos (u,v) por cámara</td></tr>
+        <tr><td>Label</td><td>pose relativa [6D] dx,dy,dz,dRx,dRy,dRz</td></tr>
+        <tr><td>Variedad</td><td>yaw ±30°, rail ±9cm, luz 1500–3500 lux</td></tr>
+        <tr><td>Fuente GT</td><td><code>/tf</code> gripper/tcp → sfp_port_0</td></tr>
+        <tr><td>Herramienta</td><td><code>collect_keypoint_dataset.py</code></td></tr>
+      </table>
+    </div>
+
+    <!-- Dataset B -->
+    <div class="card ds-b">
+      <div class="card-header">
+        <div class="card-icon">🤖</div>
+        <div>
+          <div class="card-title">Dataset B — CheatCode IL</div>
+          <div class="card-subtitle">Sintético · automático · behavioral cloning</div>
+        </div>
+      </div>
+      <p>Episodios perfectos generados por <code>CheatCode.py</code> usando ground truth. Base principal del entrenamiento ACT (70 %).</p>
+      <div class="stat-row">
+        <div class="stat"><span>~1 000</span> episodios</div>
+        <div class="stat"><span>600</span> SFP</div>
+        <div class="stat"><span>400</span> SC</div>
+      </div>
+      <table class="info">
+        <tr><th>Campo</th><th>Detalle</th></tr>
+        <tr><td>Observación</td><td>3 × RGB + estado [32D]</td></tr>
+        <tr><td>Acción</td><td>Twist [6D] vx,vy,vz,ωx,ωy,ωz</td></tr>
+        <tr><td>Formato</td><td>LeRobot dataset (parquet + mp4)</td></tr>
+        <tr><td>Herramienta</td><td><code>ros2 bag record</code> + conversión</td></tr>
+        <tr><td>Req. lanzamiento</td><td><code>ground_truth:=true</code></td></tr>
+        <tr><td>Frecuencia</td><td>~4 Hz (mismo que RunACT)</td></tr>
+      </table>
+    </div>
+
+    <!-- Dataset C -->
+    <div class="card ds-c">
+      <div class="card-header">
+        <div class="card-icon">🕹️</div>
+        <div>
+          <div class="card-title">Dataset C — Teleop humana</div>
+          <div class="card-subtitle">Manual · diversidad de errores y recovery</div>
+        </div>
+      </div>
+      <p>Demostraciones grabadas con teclado cartesiano. Cubre micro-correcciones y recuperaciones que el CheatCode nunca produce (condición sin ground truth).</p>
+      <div class="stat-row">
+        <div class="stat"><span>300–500</span> episodios</div>
+        <div class="stat"><span>30 %</span> del mix ACT</div>
+      </div>
+      <table class="info">
+        <tr><th>Campo</th><th>Detalle</th></tr>
+        <tr><td>Misma estructura</td><td>que Dataset B</td></tr>
+        <tr><td>Herramienta</td><td><code>lerobot-record</code></td></tr>
+        <tr><td>Req. lanzamiento</td><td><code>ground_truth:=false</code></td></tr>
+        <tr><td>Confirmar episodio</td><td>tecla <code>→</code></td></tr>
+        <tr><td>Cancelar / regrabar</td><td>tecla <code>←</code></td></tr>
+        <tr><td>Esfuerzo estimado</td><td>~2–4 horas operador</td></tr>
+      </table>
+    </div>
+
+    <!-- Dataset D -->
+    <div class="card ds-d">
+      <div class="card-header">
+        <div class="card-icon">🔬</div>
+        <div>
+          <div class="card-title">Dataset D — RLPD buffer</div>
+          <div class="card-subtitle">Filtrado de B+C · inserción fina (&lt;5 mm)</div>
+        </div>
+      </div>
+      <p>Subconjunto de transiciones críticas para inicializar el replay buffer del SAC. No requiere grabación adicional — se filtra automáticamente de B y C.</p>
+      <div class="stat-row">
+        <div class="stat"><span>~80 000</span> transiciones</div>
+        <div class="stat"><span>dist &lt; 5 mm</span></div>
+        <div class="stat"><span>últimos 50</span> frames</div>
+      </div>
+      <table class="info">
+        <tr><th>Campo</th><th>Detalle</th></tr>
+        <tr><td>Tupla</td><td>(s[32D], Δa[3D], r, s'[32D], done)</td></tr>
+        <tr><td>Formato</td><td>HDF5</td></tr>
+        <tr><td>Herramienta</td><td><code>filter_insertion_frames.py</code></td></tr>
+        <tr><td>Reward r</td><td>desde <code>/scoring/insertion_event</code> (solo en entrenamiento local)</td></tr>
+        <tr><td>⚠️ Eval</td><td><code>/scoring/**</code> BLOQUEADO por Zenoh ACL</td></tr>
+      </table>
+    </div>
+
+  </div>
+</div>
+
+<!-- ─────────── PIPELINE DE ENTRENAMIENTO ─────────── -->
+<div class="section">
+  <h2>Pipeline de entrenamiento por capas</h2>
+  <div class="pipeline">
+
+    <div class="pipeline-row">
+      <div class="layer-badge">CAPA 0</div>
+      <div class="layer-name">Keypoint Pose Estimator</div>
+      <div class="layer-input">
+        Entrada: <code>Dataset A (15k imgs)</code> &nbsp;·&nbsp;
+        Modelo: <code>MobileNetV3-Small</code> &nbsp;·&nbsp;
+        Salida: <code>pose_relativa [6D]</code><br>
+        Cmd: <code>pixi run python scripts/train_keypoint_estimator.py --connector_type sfp</code>
+      </div>
+    </div>
+
+    <div class="arrow-down">↓ la salida de Capa 0 se agrega al vector de estado → 32D</div>
+
+    <div class="pipeline-row">
+      <div class="layer-badge">CAPA 2</div>
+      <div class="layer-name">ACT Policy — ResNet-18 + Transformer</div>
+      <div class="layer-input">
+        Entrada: <code>B (70%) + C (30%)</code> &nbsp;·&nbsp;
+        Estado: <code>[32D]</code> &nbsp;·&nbsp;
+        chunk_size: <code>20</code> &nbsp;·&nbsp;
+        Salida: <code>Twist [6D]</code><br>
+        Cmd: <code>pixi run lerobot-train --policy.type=act --policy.chunk_size=20</code>
+      </div>
+    </div>
+
+    <div class="arrow-down">↓ se activa solo cuando dist_plug_tip ≤ 5 mm</div>
+
+    <div class="pipeline-row">
+      <div class="layer-badge">CAPA 3</div>
+      <div class="layer-name">SAC Residual — MLP 256×256</div>
+      <div class="layer-input">
+        Entrada: <code>Dataset D (80k trans.)</code> &nbsp;·&nbsp;
+        Estado: <code>[32D]</code> &nbsp;·&nbsp;
+        Salida: <code>Δaction [3D]</code><br>
+        Requiere: <code>AIC_ENABLE_ACL desactivado</code> durante entrenamiento (reward desde <code>/scoring/insertion_event</code>)
+      </div>
+    </div>
+
+    <div class="arrow-down">↓ todas las capas bajo supervisión de</div>
+
+    <div class="pipeline-row" style="border-color: var(--accent2);">
+      <div class="layer-badge" style="background: var(--accent2);">FSM</div>
+      <div class="layer-name">Safety Monitor — 50 Hz</div>
+      <div class="layer-input">
+        F/T &gt; 20 N por &gt;1s → <code>RETRACT</code> &nbsp;·&nbsp;
+        Reintentos ≤ 3 &nbsp;·&nbsp;
+        Timeout: <code>160 s</code> (de 180 s max)<br>
+        Evita penalización: <code>−12 pts (force)</code> y <code>−24 pts (contact)</code>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ─────────── RESUMEN DE VOLUMEN ─────────── -->
+<div class="section">
+  <h2>Resumen de volumen y esfuerzo</h2>
+  <table class="vol-table">
+    <thead>
+      <tr>
+        <th>Dataset</th>
+        <th>Para qué capa</th>
+        <th>Fuente</th>
+        <th>Volumen</th>
+        <th>Esfuerzo humano</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>A — Keypoints</strong></td>
+        <td>Capa 0 — Keypoint Estimator</td>
+        <td>Gazebo GT <code>/tf</code> automático</td>
+        <td>~15 000 imágenes</td>
+        <td><span class="badge-pill pill-none">Ninguno</span></td>
+      </tr>
+      <tr>
+        <td><strong>B — CheatCode IL</strong></td>
+        <td>Capa 2 — ACT (70 %)</td>
+        <td>CheatCode policy automático</td>
+        <td>~1 000 episodios</td>
+        <td><span class="badge-pill pill-none">Ninguno</span></td>
+      </tr>
+      <tr>
+        <td><strong>C — Teleop demos</strong></td>
+        <td>Capa 2 — ACT (30 %)</td>
+        <td>Teleoperation humana</td>
+        <td>~400 episodios</td>
+        <td><span class="badge-pill pill-moderate">Moderado (~3h)</span></td>
+      </tr>
+      <tr>
+        <td><strong>D — RLPD buffer</strong></td>
+        <td>Capa 3 — SAC init</td>
+        <td>Filtrado automático de B+C</td>
+        <td>~80 000 transiciones</td>
+        <td><span class="badge-pill pill-auto">Automático</span></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ─────────── ADVERTENCIAS ─────────── -->
+<div class="section">
+  <h2>Advertencias críticas</h2>
+  <div class="warnings">
+
+    <div class="warn red">
+      <div class="warn-icon">🚫</div>
+      <div>
+        <strong>/scoring/** bloqueado durante evaluación</strong>
+        <p>El topic <code>/scoring/insertion_event</code> está bloqueado por el ACL de Zenoh para el contenedor <code>model</code> (ver <code>docker/aic_eval/aic_zenoh_config.json5</code>). Solo se puede usar durante entrenamiento local con <code>AIC_ENABLE_ACL</code> desactivado. El SAC entrenado <strong>no</strong> depende de este topic en inferencia.</p>
+      </div>
+    </div>
+
+    <div class="warn red">
+      <div class="warn-icon">⚠️</div>
+      <div>
+        <strong>Cambiar ground_truth antes de subir al portal</strong>
+        <p>El <code>docker-compose.yaml</code> actual tiene <code>ground_truth:=true</code>. Debe cambiarse a <code>ground_truth:=false</code> en la imagen de evaluación oficial. Los frames <code>/tf</code> de puertos NO estarán disponibles en evaluación.</p>
+      </div>
+    </div>
+
+    <div class="warn yellow">
+      <div class="warn-icon">🔧</div>
+      <div>
+        <strong>Tare del sensor F/T</strong>
+        <p>El scoring llama al tare automáticamente antes de spawnear el cable. Durante la grabación de datasets, hacer tare manualmente: <code>ros2 service call /aic_controller/tare_force_torque_sensor std_srvs/srv/Trigger</code> antes de cada episodio.</p>
+      </div>
+    </div>
+
+    <div class="warn orange">
+      <div class="warn-icon">🌐</div>
+      <div>
+        <strong>Domain gap sim → real (Fase 2)</strong>
+        <p>El Keypoint Estimator entrenado en Gazebo necesitará fine-tuning para el workcell físico. Isaac Lab (<code>aic_utils/aic_isaac/</code>) tiene <code>randomize_dome_light()</code> y <code>randomize_board_and_parts()</code> para mayor variedad de iluminación y posición.</p>
+      </div>
+    </div>
+
+    <div class="warn green">
+      <div class="warn-icon">✅</div>
+      <div>
+        <strong>Uso de ground truth en entrenamiento: permitido</strong>
+        <p>Las reglas del reto (<code>challenge_rules.md</code> sec. 2.c) permiten explícitamente usar toda la información de estado interna, incluyendo <code>/tf</code>, durante entrenamiento. El uso de <code>ground_truth:=true</code> para Dataset A y B es válido.</p>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<footer>
+  AIC — Qualification Phase &nbsp;·&nbsp; Generado: mayo 2026 &nbsp;·&nbsp;
+  Referencia completa: <code>docs/training_architecture.md</code>
+</footer>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      darkMode: true,
+      background: '#22263a',
+      primaryColor: '#5b8dee',
+      primaryTextColor: '#e2e8f0',
+      primaryBorderColor: '#2e3350',
+      lineColor: '#8892aa',
+      secondaryColor: '#7c3aed',
+      tertiaryColor: '#1a1d27',
+      fontSize: '14px'
+    },
+    flowchart: {
+      htmlLabels: true,
+      curve: 'basis'
+    }
+  });
+</script>
+</body>
+</html>
