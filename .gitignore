@@ -24,3 +24,4 @@ aic_results_from_eval/
 aic_camera_bags/
 aic_camera_data/
 *.mcap
+aic_neurobot/aic_images_cameras
