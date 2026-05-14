@@ -122,9 +122,12 @@ PORT_FRAMES: Dict[str, List[str]] = {
         "task_board/nic_card_mount_3/sfp_port_0_link",
         "task_board/nic_card_mount_4/sfp_port_0_link",
     ],
+    # SC Port: model name = sc_port_N (from task_board.urdf.xacro sc_port_N_present:=true),
+    # link name = sc_port_link (from aic_assets/models/SC Port/model.sdf).
+    # Full TF frame: task_board/sc_port_N/sc_port_link
     "sc": [
-        "task_board/sc_mount_0/sc_port_0_link",
-        "task_board/sc_mount_1/sc_port_0_link",
+        "task_board/sc_port_0/sc_port_link",
+        "task_board/sc_port_1/sc_port_link",
     ],
 }
 

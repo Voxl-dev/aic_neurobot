@@ -220,58 +220,182 @@ export DBX_CONTAINER_MANAGER=docker
 
 ### 3.1 Dataset A — Ground truth keypoints
 
-**Terminal 1 — Simulación con ground truth, sin engine:**
+La recolección usa **dos contenedores Docker** orquestados con
+`docker/docker-compose.dataset_a.yaml`:
+
+- **`eval`** — imagen oficial `aic_eval`, levanta Gazebo con
+  `ground_truth:=true` y sin engine. Publica `/tf` con la pose exacta de cada
+  puerto SFP y SC.
+- **`collector`** — imagen basada en `aic_eval` + `transforms3d`. Corre
+  `scripts/collect_keypoint_dataset.py` dentro del mismo namespace de red que
+  `eval` (`network_mode: service:eval`), por lo que tanto el router Zenoh como
+  Gazebo Transport están accesibles en `localhost`.
+
+#### Prerequisitos (una sola vez por sesión WSL)
+
+WSL2 no activa `shared` mount propagation por defecto. Sin esto, Docker Desktop
+no puede conectar los namespaces de red entre contenedores:
 
 ```bash
-distrobox enter -r aic_eval -- /entrypoint.sh \
-  gazebo_gui:=false \
-  ground_truth:=true \
-  start_aic_engine:=false
+# Desde el host WSL (Giskard), NO dentro de ningún contenedor
+sudo mount --make-rshared / && sudo mount --make-rshared /dev/pts
+xhost +local:docker
 ```
 
-**Terminal 2 — Verificar frames TF disponibles:**
-
+Para que se aplique automáticamente en cada arranque de WSL:
 ```bash
-# Dentro de WSL
-sudo mount --make-rshared /
-
-# Luego reintentar
-export DBX_CONTAINER_MANAGER=docker
-distrobox create -r --nvidia -i ghcr.io/intrinsic-dev/aic/aic_eval:latest aic_eval
-
-distrobox enter aic_eval
-# Ver qué frames publica el ground truth
-pixi run ros2 topic echo /tf --once
-
-# Generar árbol de frames (produce frames.pdf)
-pixi run ros2 run tf2_tools view_frames
-
-# Verificar que sfp_port_0, sc_port_0 están presentes
-pixi run ros2 run tf2_ros tf2_echo gripper/tcp sfp_port_0
+sudo tee /etc/wsl.conf > /dev/null <<'EOF'
+[boot]
+command = mount --make-rshared / && mount --make-rshared /dev/pts
+EOF
+# Luego desde PowerShell: wsl --shutdown  (una sola vez)
 ```
 
-**Script de recolección** (a implementar como `scripts/collect_keypoint_dataset.py`):
+#### Build del collector (solo cuando cambie el Dockerfile)
 
 ```bash
-pixi run python scripts/collect_keypoint_dataset.py \
-  --output_dir ~/aic_datasets/dataset_A \
-  --n_scenes 5000 \
-  --connector_types sfp sc \
-  --vary_board_yaw true
+cd /mnt/c/Users/diegu/Documents/mis_proyectos/robotica/aic
+docker compose -f docker/docker-compose.dataset_a.yaml build collector
 ```
 
-**Verificación:**
+El Dockerfile instala `transforms3d` sobre `aic_eval:latest` y copia
+`docker/aic_collector/collect_entrypoint.sh`, que:
+1. Hace `source /ws_aic/install/setup.bash`
+2. Configura `ZENOH_CONFIG_OVERRIDE` para conectar al router del contenedor `eval`
+3. Espera `${COLLECTOR_INIT_DELAY:-20}` segundos a que Gazebo inicialice
+4. Ejecuta `python3 /workspace/collect_keypoint_dataset.py "$@"`
+
+#### Ejecución — colección completa
 
 ```bash
-ls ~/aic_datasets/dataset_A/*.json | wc -l   # debe ser ~5000
+# 5000 escenas × 2 tipos (sfp + sc) = ~10 000 muestras
+docker compose -f docker/docker-compose.dataset_a.yaml up
+```
 
-pixi run python -c "
+Señales esperadas en los logs:
+
+```
+collector  | [collector] Waiting 20s for eval container to initialize...
+collector  | [collector] Starting dataset collection. Args: ...
+collector  | Waiting for camera_infos (timeout 60 s)...
+collector  | [  50 samples |  0.5%] scene=24 type=sfp port=task_board/nic_card_mount_0/sfp_port_0_link
+```
+
+El contenedor `collector` termina solo cuando alcanza `--n_scenes`. El
+contenedor `eval` puede detenerse manualmente con `Ctrl+C`.
+
+#### Test rápido con pocas escenas
+
+```bash
+N_SCENES=100 docker compose -f docker/docker-compose.dataset_a.yaml up
+```
+
+---
+
+#### Dónde se guardan los resultados
+
+El volumen bind-mounted en el compose es:
+
+```
+${HOME}/aic_datasets/dataset_A   ←→   /aic_datasets/dataset_A  (dentro del collector)
+```
+
+En WSL esto corresponde a `~/aic_datasets/dataset_A` (por defecto
+`/home/diego/aic_datasets/dataset_A`). Para usar otra ruta:
+
+```bash
+DATASET_DIR=/ruta/personalizada docker compose -f docker/docker-compose.dataset_a.yaml up
+```
+
+Estructura de salida por muestra:
+
+```
+~/aic_datasets/dataset_A/
+  ├── 0000000.json          ← metadata: keypoints 2D × 3 cámaras + pose_relative_tcp [6D]
+  ├── 0000001.json
+  ├── ...
+  └── images/
+        ├── 0000000_left.png
+        ├── 0000000_center.png
+        ├── 0000000_right.png
+        ├── 0000001_left.png
+        └── ...
+```
+
+Cada JSON contiene:
+
+```json
+{
+  "sample_id": 0,
+  "scene_idx": 0,
+  "connector_type": "sfp",
+  "port_frame": "task_board/nic_card_mount_0/sfp_port_0_link",
+  "images": {
+    "left":   "images/0000000_left.png",
+    "center": "images/0000000_center.png",
+    "right":  "images/0000000_right.png"
+  },
+  "keypoints_left":   [[u1,v1], "...", [u9,v9]],
+  "keypoints_center": [[u1,v1], "...", [u9,v9]],
+  "keypoints_right":  [[u1,v1], "...", [u9,v9]],
+  "pose_relative_tcp": [dx, dy, dz, dRx, dRy, dRz],
+  "tcp_pose_in_base":  [x, y, z, qx, qy, qz, qw],
+  "port_pose_in_base": [x, y, z, qx, qy, qz, qw]
+}
+```
+
+> **Permisos:** Los archivos se crean como `root` dentro del contenedor.
+> Si aparecen errores de permiso en el host, ejecutar:
+> `sudo chown -R diego:diego ~/aic_datasets`
+
+---
+
+#### Cómo ver y verificar el dataset generado
+
+```bash
+# Contar muestras totales
+ls ~/aic_datasets/dataset_A/*.json | wc -l
+# Objetivo: ~10 000 (5000 escenas × 2 tipos)
+
+# Estadísticas de pose relativa (primeras 100 muestras)
+python3 - <<'EOF'
 import json, glob, numpy as np
-files = glob.glob('$HOME/aic_datasets/dataset_A/*.json')
-poses = [json.load(open(f))['pose_relative_tcp'] for f in files[:100]]
+files = sorted(glob.glob('/home/diego/aic_datasets/dataset_A/*.json'))[:100]
+poses = [json.load(open(f))['pose_relative_tcp'] for f in files]
 arr = np.array(poses)
-print('pose stats — mean:', arr.mean(0).round(4), 'std:', arr.std(0).round(4))
-"
+print(f'Muestras:          {len(arr)}')
+print(f'pose_rel mean:     {arr.mean(0).round(4)}')
+print(f'pose_rel std:      {arr.std(0).round(4)}')
+print(f'dist XYZ medio:    {np.linalg.norm(arr[:,:3], axis=1).mean():.4f} m')
+EOF
+
+# Verificar integridad de imágenes de la primera muestra
+python3 - <<'EOF'
+import json, pathlib
+BASE = pathlib.Path('/home/diego/aic_datasets/dataset_A')
+s = json.load(open(BASE / '0000000.json'))
+for cam, rel in s['images'].items():
+    p = BASE / rel
+    size_kb = p.stat().st_size // 1024 if p.exists() else 0
+    print(f'{cam:8s}  {size_kb:5d} KB  {"✓" if p.exists() else "✗ MISSING"}')
+print('connector_type:    ', s['connector_type'])
+print('port_frame:        ', s['port_frame'])
+print('keypoints_center[0]:', s['keypoints_center'][0])
+print('pose_relative_tcp: ', [round(v,4) for v in s['pose_relative_tcp']])
+EOF
+
+# Balance entre tipos de conector
+python3 - <<'EOF'
+import json, glob
+from collections import Counter
+files = glob.glob('/home/diego/aic_datasets/dataset_A/*.json')
+c = Counter(json.load(open(f))['connector_type'] for f in files)
+for k,v in sorted(c.items()):
+    print(f'{k:6s}: {v:6d} muestras')
+EOF
+
+# Ver una imagen con el visor del sistema
+xdg-open ~/aic_datasets/dataset_A/images/0000000_center.png
 ```
 
 ---

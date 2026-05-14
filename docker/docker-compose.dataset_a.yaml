@@ -1,0 +1,109 @@
+name: aic_dataset_a
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dataset A collection — Keypoint Pose Estimator ground-truth dataset
+#
+# Two services:
+#   eval      — Gazebo simulation with ground_truth:=true, no AIC engine.
+#               Publishes /tf frames for all SFP and SC ports.
+#   collector — Runs scripts/collect_keypoint_dataset.py.
+#               Shares eval's network namespace so both ROS 2 (Zenoh) and
+#               Gazebo Transport (gz service CLI) see the same localhost.
+#
+# Quick start (from repo root in WSL):
+#
+#   # 1. One-time setup per WSL session
+#   sudo mount --make-rshared /
+#   sudo mount --make-rshared /dev/pts
+#   xhost +local:docker
+#
+#   # 2. Build the collector image (only needed after code changes)
+#   docker compose -f docker/docker-compose.dataset_a.yaml build collector
+#
+#   # 3. Run — output lands in ~/aic_datasets/dataset_A
+#   docker compose -f docker/docker-compose.dataset_a.yaml up
+#
+#   # 4. Collect fewer scenes for a quick test (default is N_SCENES=5000)
+#   N_SCENES=200 docker compose -f docker/docker-compose.dataset_a.yaml up
+#
+#   # 5. Interactive shell inside the collector (for debugging)
+#   docker compose -f docker/docker-compose.dataset_a.yaml \
+#     run --rm --entrypoint bash collector
+#
+# Verify the output:
+#   ls ~/aic_datasets/dataset_A/*.json | wc -l   # ~N_SCENES * 2 (sfp + sc)
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Gazebo simulation ───────────────────────────────────────────────────────
+  eval:
+    image: ghcr.io/intrinsic-dev/aic/aic_eval:latest
+    # No engine (no trial management, no cable spawn).
+    # ground_truth:=true publishes /tf frames for every SFP and SC port.
+    # NOTE: spawn_task_board is intentionally omitted here because
+    # aic_gz_bringup.launch.py's IncludeLaunchDescription only forwards 7 pose
+    # args to spawn_task_board.launch.py — it never forwards nic_card_mount_N_present
+    # or sc_port_N_present.  The collector spawns the task board itself so that
+    # all required mounts are included.
+    command: >-
+      gazebo_gui:=false
+      launch_rviz:=false
+      ground_truth:=true
+      start_aic_engine:=false
+    gpus: all
+    environment:
+      AIC_EVAL_PASSWD: CHANGE_IN_PROD
+      AIC_MODEL_PASSWD: CHANGE_IN_PROD
+      DISPLAY: $DISPLAY
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    # Default bridge network created by compose (no internal: true needed here)
+
+  # ── Keypoint dataset collector ──────────────────────────────────────────────
+  collector:
+    build:
+      dockerfile: docker/aic_collector/Dockerfile
+      context: ..
+    # Share eval's network namespace so that:
+    #   - rmw_zenoh_cpp connects to the Zenoh router at localhost:7447
+    #   - `gz service` CLI discovers the Gazebo Transport server on localhost
+    #   - UDP multicast for Gazebo Transport discovery works on the shared lo
+    network_mode: "service:eval"
+    gpus: all
+    depends_on:
+      - eval
+    environment:
+      RMW_IMPLEMENTATION: rmw_zenoh_cpp
+      ZENOH_ROUTER_CHECK_ATTEMPTS: -1
+      # Router is in the eval container; shared network → localhost
+      AIC_ROUTER_ADDR: localhost:7447
+      AIC_MODEL_PASSWD: CHANGE_IN_PROD
+      DISPLAY: $DISPLAY
+      # Increase to 30 on slow machines (extra wait before collection starts)
+      COLLECTOR_INIT_DELAY: "20"
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      # Collection script — bind-mounted read-only so edits apply without rebuild
+      - ../scripts:/workspace:ro
+      # Dataset output — bind-mounted to the WSL user's home directory
+      # Override: DATASET_DIR=/path/to/datasets docker compose ... up
+      - ${DATASET_DIR:-${HOME}/aic_datasets}:/aic_datasets
+    # Args forwarded to collect_keypoint_dataset.py via collect_entrypoint.sh
+    command:
+      - "--output_dir"
+      - "/aic_datasets/dataset_A"
+      - "--n_scenes"
+      - "${N_SCENES:-5000}"
+      - "--connector_types"
+      - "sfp"
+      - "sc"
+      - "--vary_board_yaw"
+      - "true"
+      - "--settle_time"
+      - "0.5"
+      - "--seed"
+      - "42"
+    # Container exits when collection finishes — do not restart
+    restart: "no"
