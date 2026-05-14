@@ -35,9 +35,12 @@ services:
       RMW_IMPLEMENTATION: rmw_zenoh_cpp
       ZENOH_ROUTER_CHECK_ATTEMPTS: -1
       AIC_ROUTER_ADDR: eval:7447
+      AIC_CAMERA_OUTPUT_DIR: /ws_aic/src/aic/aic_camera_data
       # AIC_ROUTER_ADDR: 172.31.72.84:7447
       AIC_MODEL_PASSWD: CHANGE_IN_PROD
       # AIC_ENABLE_ACL: true
+    volumes:
+      - ../aic_camera_data:/ws_aic/src/aic/aic_camera_data
 networks:
   default:
-    internal: true
+    internal: false

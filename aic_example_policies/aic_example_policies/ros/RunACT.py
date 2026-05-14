@@ -55,6 +55,14 @@ class RunACT(Policy):
     def __init__(self, parent_node: Node):
         super().__init__(parent_node)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        camera_output_dir = os.environ.get("AIC_CAMERA_OUTPUT_DIR")
+        self.camera_data_dir = (
+            Path(camera_output_dir) if camera_output_dir else Path.cwd() / "aic_camera_data"
+        )
+        self.camera_frame_index = 0
+        for camera_name in ("left", "center", "right"):
+            (self.camera_data_dir / camera_name).mkdir(parents=True, exist_ok=True)
+        self.get_logger().info(f"Camera images will be saved to {self.camera_data_dir}")
 
         # -------------------------------------------------------------------------
         # 1. Configuration & Weights Loading
@@ -129,15 +137,8 @@ class RunACT(Policy):
 
         # Config
         self.image_scaling = 0.25  # Must match AICRobotAICControllerConfig
-        self.camera_data_dir = Path(
-            os.environ.get("AIC_CAMERA_OUTPUT_DIR", "aic_camera_data")
-        )
-        self.camera_frame_index = 0
-        for camera_name in ("left", "center", "right"):
-            (self.camera_data_dir / camera_name).mkdir(parents=True, exist_ok=True)
 
         self.get_logger().info("Normalization statistics loaded successfully.")
-        self.get_logger().info(f"Camera images will be saved to {self.camera_data_dir}")
 
     @staticmethod
     def _ros_image_to_numpy(raw_img) -> np.ndarray:

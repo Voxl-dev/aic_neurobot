@@ -21,4 +21,6 @@ aic_utils/aic_isaac/aic_isaaclab/source/aic_task/aic_task/tasks/manager_based/ai
 
 # Evaluation outputs and recorded ROS bags
 aic_results_from_eval/
+aic_camera_bags/
+aic_camera_data/
 *.mcap
