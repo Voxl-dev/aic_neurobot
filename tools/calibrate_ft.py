@@ -477,6 +477,11 @@ def parse_args() -> argparse.Namespace:
         help="Directorio de bag multi-fase extraído (puede repetirse). "
              "Ej: --calib extracted_eval_bags_csv/ft_calib_20260514_204052",
     )
+    p.add_argument(
+        "--no-trials", action="store_true",
+        help="Omitir los bags de FUENTE A (bag_trial_1/2/3). "
+             "Útil para evaluar solo los datos de FTCalibrationSampler.",
+    )
     return p.parse_args()
 
 
@@ -491,7 +496,8 @@ def main() -> None:
     print("FUENTE A — BAGS SEPARADOS (bag_trial_1/2/3)")
     print("=" * 70)
 
-    for trial in TRIALS:
+    trials_active = [] if args.no_trials else TRIALS
+    for trial in trials_active:
         trial_dir = ROOT / trial
         if not trial_dir.exists():
             print(f"[warn] No encontrado: {trial_dir}")

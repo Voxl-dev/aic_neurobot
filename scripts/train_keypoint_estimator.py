@@ -24,6 +24,57 @@ Ejemplos:
     --output_dir outputs/keypoint_sfp \
     --preview_augmentations 12
 """
+"""
+Entrenamiento minimo del Keypoint Estimator para Dataset A.
+
+El dataset se interpreta como una coleccion de muestras por camara:
+  1 JSON + 3 imagenes  ->  3 samples de entrenamiento
+
+Cada sample contiene:
+  - una imagen RGB
+  - 9 keypoints 2D del puerto objetivo
+
+El modelo propuesto es MobileNetV3-Small con una cabeza de regresion
+que predice 18 valores = 9 x (u, v).
+
+Ejemplos:
+  pixi run python scripts/train_keypoint_estimator.py \
+    --dataset_dir ~/aic_datasets/dataset_A \
+    --connector_type sfp \
+    --output_dir outputs/keypoint_sfp
+
+  pixi run python scripts/train_keypoint_estimator.py \
+    --dataset_dir ~/aic_datasets/dataset_A \
+    --connector_type sfp \
+    --output_dir outputs/keypoint_sfp \
+    --preview_augmentations 12
+"""
+
+"""
+Entrenamiento minimo del Keypoint Estimator para Dataset A.
+
+El dataset se interpreta como una coleccion de muestras por camara:
+  1 JSON + 3 imagenes  ->  3 samples de entrenamiento
+
+Cada sample contiene:
+  - una imagen RGB
+  - 9 keypoints 2D del puerto objetivo
+
+El modelo propuesto es MobileNetV3-Small con una cabeza de regresion
+que predice 18 valores = 9 x (u, v).
+
+Ejemplos:
+  pixi run python scripts/train_keypoint_estimator.py \
+    --dataset_dir ~/aic_datasets/dataset_A \
+    --connector_type sfp \
+    --output_dir outputs/keypoint_sfp
+
+  pixi run python scripts/train_keypoint_estimator.py \
+    --dataset_dir ~/aic_datasets/dataset_A \
+    --connector_type sfp \
+    --output_dir outputs/keypoint_sfp \
+    --preview_augmentations 12
+"""
 
 from __future__ import annotations
 
@@ -431,6 +482,35 @@ def build_model(num_keypoints: int = 9, pretrained: bool = True):
     return backbone
 
 
+def freeze_backbone(model) -> None:
+    for param in model.features.parameters():
+        param.requires_grad = False
+
+
+def unfreeze_backbone(model) -> None:
+    for param in model.features.parameters():
+        param.requires_grad = True
+
+
+def freeze_features_partial(model, n_trainable_blocks: int) -> None:
+    """Congela todos los bloques de features excepto los ultimos n_trainable_blocks."""
+    blocks = list(model.features)
+    n_freeze = max(0, len(blocks) - n_trainable_blocks)
+    for block in blocks[:n_freeze]:
+        for param in block.parameters():
+            param.requires_grad = False
+    for block in blocks[n_freeze:]:
+        for param in block.parameters():
+            param.requires_grad = True
+
+
+def print_trainable_summary(model) -> None:
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    pct = 100.0 * trainable / max(total, 1)
+    print(f"Parametros entrenables: {trainable:,} / {total:,} ({pct:.1f}%)")
+
+
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Entrenamiento del Keypoint Estimator.")
     parser.add_argument("--dataset_dir", type=Path, required=True, help="Ruta a dataset_A.")
@@ -461,6 +541,33 @@ def build_argparser() -> argparse.ArgumentParser:
         "--disable_augmentations",
         action="store_true",
         help="Entrena sin augmentations.",
+    )
+    parser.add_argument(
+        "--freeze_backbone",
+        action="store_true",
+        help="Congela el backbone (features) y entrena solo la cabeza de regresion.",
+    )
+    parser.add_argument(
+        "--unfreeze_epoch",
+        type=int,
+        default=0,
+        help="Epoca en la que se descongela el backbone (0 = nunca). Requiere --freeze_backbone.",
+    )
+    parser.add_argument(
+        "--backbone_lr_factor",
+        type=float,
+        default=0.1,
+        help="Factor del LR para los bloques de backbone entrenables (default: 0.1).",
+    )
+    parser.add_argument(
+        "--finetune_last_n_blocks",
+        type=int,
+        default=0,
+        help=(
+            "Fine-tuning parcial: congela todos los bloques de features excepto los ultimos N. "
+            "Usa 2 grupos de LR: backbone*backbone_lr_factor y cabeza*lr. "
+            "Recomendado para ~1200 muestras: --finetune_last_n_blocks 3"
+        ),
     )
     parser.add_argument(
         "--export_augmented_dataset",
@@ -801,12 +908,45 @@ def main() -> int:
     )
 
     model = build_model(num_keypoints=9, pretrained=not args.disable_pretrained).to(args.device)
+
+    backbone_lr = args.lr * args.backbone_lr_factor
+
+    if args.finetune_last_n_blocks > 0:
+        # Modo fine-tuning parcial: congela primeros bloques, entrena ultimos N + cabeza
+        freeze_features_partial(model, args.finetune_last_n_blocks)
+        n_total_blocks = len(list(model.features))
+        n_frozen = max(0, n_total_blocks - args.finetune_last_n_blocks)
+        print(
+            f"Fine-tuning parcial | bloques congelados: {n_frozen}/{n_total_blocks} | "
+            f"LR backbone={backbone_lr:.2e} | LR cabeza={args.lr:.2e}"
+        )
+        print_trainable_summary(model)
+        optimizer = torch_mod.optim.AdamW(
+            [
+                {"params": model.features[n_frozen:].parameters(), "lr": backbone_lr},
+                {"params": model.classifier.parameters(), "lr": args.lr},
+            ],
+            weight_decay=args.weight_decay,
+        )
+    elif args.freeze_backbone:
+        # Modo cabeza-solo: backbone completamente congelado
+        freeze_backbone(model)
+        print("Backbone congelado | entrenando solo la cabeza de regresion")
+        print_trainable_summary(model)
+        optimizer = torch_mod.optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+        )
+    else:
+        # Modo completo: toda la red
+        optimizer = torch_mod.optim.AdamW(
+            model.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+        )
+
     loss_fn = nn_mod.SmoothL1Loss(beta=0.02)
-    optimizer = torch_mod.optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-    )
     scheduler = torch_mod.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     best_val_loss = float("inf")
@@ -814,6 +954,21 @@ def main() -> int:
     start_time = time.time()
 
     for epoch in range(1, args.epochs + 1):
+        if args.freeze_backbone and args.unfreeze_epoch > 0 and epoch == args.unfreeze_epoch:
+            unfreeze_backbone(model)
+            optimizer = torch_mod.optim.AdamW(
+                [
+                    {"params": model.features.parameters(), "lr": backbone_lr},
+                    {"params": model.classifier.parameters(), "lr": args.lr},
+                ],
+                weight_decay=args.weight_decay,
+            )
+            scheduler = torch_mod.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=args.epochs - epoch + 1
+            )
+            print(f"[{epoch:03d}] Backbone descongelado | LR backbone={backbone_lr:.2e} | LR head={args.lr:.2e}")
+
+        t0_train = time.time()
         train_loss, train_mae_px = run_epoch(
             model,
             train_loader,
@@ -823,6 +978,9 @@ def main() -> int:
             image_width=args.image_width,
             image_height=args.image_height,
         )
+        t_train = time.time() - t0_train
+
+        t0_val = time.time()
         val_loss, val_mae_px = run_epoch(
             model,
             val_loader,
@@ -832,7 +990,15 @@ def main() -> int:
             image_width=args.image_width,
             image_height=args.image_height,
         )
+        t_val = time.time() - t0_val
         scheduler.step()
+
+        t_epoch = t_train + t_val
+        elapsed = time.time() - start_time
+        epochs_left = args.epochs - epoch
+        eta_sec = t_epoch * epochs_left
+        eta_str = f"{int(eta_sec // 3600):02d}h{int((eta_sec % 3600) // 60):02d}m{int(eta_sec % 60):02d}s"
+        elapsed_str = f"{int(elapsed // 3600):02d}h{int((elapsed % 3600) // 60):02d}m{int(elapsed % 60):02d}s"
 
         row = {
             "epoch": epoch,
@@ -841,13 +1007,18 @@ def main() -> int:
             "val_loss": val_loss,
             "val_mae_px": val_mae_px,
             "lr": optimizer.param_groups[0]["lr"],
+            "t_train_s": round(t_train, 2),
+            "t_val_s": round(t_val, 2),
+            "t_epoch_s": round(t_epoch, 2),
         }
         history.append(row)
 
         print(
             f"[{epoch:03d}/{args.epochs:03d}] "
-            f"train_loss={train_loss:.5f} train_mae_px={train_mae_px:.2f} | "
-            f"val_loss={val_loss:.5f} val_mae_px={val_mae_px:.2f}"
+            f"loss={train_loss:.5f} mae={train_mae_px:.2f}px | "
+            f"val_loss={val_loss:.5f} val_mae={val_mae_px:.2f}px | "
+            f"train={t_train:.1f}s val={t_val:.1f}s epoca={t_epoch:.1f}s | "
+            f"elapsed={elapsed_str} ETA={eta_str}"
         )
 
         if val_loss < best_val_loss:
