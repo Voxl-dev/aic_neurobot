@@ -38,5 +38,3 @@ eval_bag_summary_plots
 extracted_eval_bags_csv
 outputs/
 
-# Ignore Bayesian files for the calibration of the GAINs
-bayesiano/
