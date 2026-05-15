@@ -166,7 +166,7 @@ pixi run python fine_tune_act_v2/fine_tune_act/scripts/bag_to_lerobot.py \
     --output     data/dataset_lerobot \
     --repo_id    aic_team/sfp_sc_insertion \
     --ckpt_sc    fine_tune_act_v2/keypoints/keypoint_sc_1h/best_sc.pt \
-    --ckpt_sfp   fine_tune_act_v2/keypoints/keypoint_sfp_1h/best_sfp.pt \
+    --ckpt_sfp   fine_tune_act_v2/keypoints/keypoint_sfp_v2/best_sfp.pt \
     --fps        10 \
     --device     cuda \
     --connector_type auto
@@ -314,7 +314,7 @@ pixi run python fine_tune_act_v2/fine_tune_act/scripts/bag_to_lerobot.py \
     --output     data/dataset_lerobot \
     --repo_id    aic_team/sfp_sc_insertion \
     --ckpt_sc    fine_tune_act_v2/keypoints/keypoint_sc_1h/best_sc.pt \
-    --ckpt_sfp   fine_tune_act_v2/keypoints/keypoint_sfp_1h/best_sfp.pt \
+    --ckpt_sfp   fine_tune_act_v2/keypoints/keypoint_sfp_v2/best_sfp.pt \
     --fps        15 \     # Más frames por episodio (15 Hz vs 10 Hz)
     --device     cuda \
     --append
