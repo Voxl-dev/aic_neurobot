@@ -49,6 +49,7 @@ import sys
 import time
 from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -82,6 +83,9 @@ BASE_FRAME = "base_link"
 STATE_DIM  = 32   # [6 joints, 1 gripper, 18 kp_coords, 3 tcp_pos, 4 tcp_quat]
 ACTION_DIM = 6    # [vx, vy, vz, wx, wy, wz]
 
+STATE_MODE_LEGACY = "legacy_keypoints"
+STATE_MODE_STEP4 = "step4_pose"
+
 # Image size stored in the dataset (must match act_aic.yaml input_shapes)
 STORE_H = 480
 STORE_W = 640
@@ -91,6 +95,18 @@ SYNC_TOL_NS = int(0.15 * 1e9)  # 150 ms
 
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+_DEFAULT_CAMERA_K = [
+    1236.6316680908203, 0.0, 576.0,
+    0.0, 1236.6314697265625, 512.0,
+    0.0, 0.0, 1.0,
+]
+_DEFAULT_CAMERA_D = [0.0, 0.0, 0.0, 0.0, 0.0]
+_DEFAULT_CAMERA_FRAMES = {
+    "left": "left_camera/optical",
+    "center": "center_camera/optical",
+    "right": "right_camera/optical",
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -186,6 +202,57 @@ def _angular_velocity(q0: np.ndarray, q1: np.ndarray, dt: float) -> np.ndarray:
     if dq[3] < 0:
         axis = -axis
     return axis * (2 * half_angle) / dt
+
+
+def _load_step4_helpers():
+    repo_root = Path(__file__).resolve().parents[3]
+    policies_root = repo_root / "aic_example_policies"
+    if str(policies_root) not in sys.path:
+        sys.path.insert(0, str(policies_root))
+    from aic_example_policies.ros.keypoint_step4 import (
+        estimate_pose_relative_tcp_from_multiview,
+    )
+    return estimate_pose_relative_tcp_from_multiview
+
+
+def _default_camera_infos() -> Dict[str, object]:
+    infos = {}
+    for camera, frame_id in _DEFAULT_CAMERA_FRAMES.items():
+        infos[camera] = SimpleNamespace(
+            header=SimpleNamespace(frame_id=frame_id),
+            height=1024,
+            width=1152,
+            distortion_model="plumb_bob",
+            d=list(_DEFAULT_CAMERA_D),
+            k=list(_DEFAULT_CAMERA_K),
+        )
+    return infos
+
+
+def _infer_keypoints_pixels(model: "KeypointInferencer", image_bgr: np.ndarray) -> np.ndarray:
+    kp_norm = model.infer(image_bgr)
+    h, w = image_bgr.shape[:2]
+    kp_xy = kp_norm.astype(np.float32).copy()
+    kp_xy[:, 0] *= float(w)
+    kp_xy[:, 1] *= float(h)
+    return kp_xy
+
+
+def _lookup_camera_poses_in_base(
+    tf_tree: "TFTree",
+    ts: int,
+    camera_infos: Dict[str, object],
+) -> Dict[str, np.ndarray]:
+    camera_poses = {}
+    for camera, info in camera_infos.items():
+        frame_id = getattr(getattr(info, "header", None), "frame_id", None)
+        if not frame_id:
+            continue
+        tf_result = tf_tree.lookup(BASE_FRAME, frame_id, ts)
+        if tf_result is None:
+            continue
+        camera_poses[camera] = _make_H(*tf_result)
+    return camera_poses
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -293,11 +360,17 @@ class TFTree:
         for (_, c) in self._dynamic:
             all_children.add(c)
 
+        has_sfp = False
+        has_sc = False
         for frame in all_children:
             if "sfp" in frame.lower():
-                return "sfp"
+                has_sfp = True
             if "sc_tip" in frame.lower() or "sc_module" in frame.lower():
-                return "sc"
+                has_sc = True
+        if has_sfp and not has_sc:
+            return "sfp"
+        if has_sc and not has_sfp:
+            return "sc"
         return None
 
 
@@ -314,6 +387,7 @@ class KeypointInferencer:
         torch_mod, _, _, _, _ = train_mod.require_torch()
 
         self.device = device or ("cuda" if torch_mod.cuda.is_available() else "cpu")
+        self._install_pathlib_checkpoint_compat()
         ckpt = torch_mod.load(str(checkpoint_path), map_location=self.device,
                               weights_only=False)
 
@@ -339,6 +413,30 @@ class KeypointInferencer:
         sys.modules[spec.name] = mod
         spec.loader.exec_module(mod)
         return mod
+
+    @staticmethod
+    def _install_pathlib_checkpoint_compat() -> None:
+        """Compatibilidad para checkpoints pickleados con pathlib._local."""
+        if "pathlib._local" in sys.modules:
+            return
+        import pathlib
+        import types
+
+        if sys.platform != "win32":
+            pathlib.WindowsPath = pathlib.PosixPath
+
+        compat = types.ModuleType("pathlib._local")
+        for name in (
+            "Path",
+            "PosixPath",
+            "WindowsPath",
+            "PurePath",
+            "PurePosixPath",
+            "PureWindowsPath",
+        ):
+            setattr(compat, name, getattr(pathlib, name))
+        sys.modules["pathlib._local"] = compat
+        setattr(pathlib, "_local", compat)
 
     def infer(self, image_bgr: np.ndarray) -> np.ndarray:
         """
@@ -521,6 +619,8 @@ def process_bag(
     kp_sfp: KeypointInferencer,
     connector_type: Optional[str],
     target_fps: int,
+    state_mode: str = STATE_MODE_LEGACY,
+    camera_infos: Optional[Dict[str, object]] = None,
 ) -> Optional[List[dict]]:
     """
     Procesa un bag completo y retorna una lista de dicts con las claves:
@@ -555,6 +655,10 @@ def process_bag(
             ct = "sfp"
 
     kp_model = kp_sfp if ct == "sfp" else kp_sc
+    estimate_step4 = None
+    if state_mode == STATE_MODE_STEP4:
+        camera_infos = camera_infos or _default_camera_infos()
+        estimate_step4 = _load_step4_helpers()
 
     center_ts = idx.timestamps[TOPIC_CENTER]
     if not center_ts:
@@ -609,8 +713,6 @@ def process_bag(
         center_bgr = _image_msg_to_bgr(center_msg)
         center_resized = cv2.resize(center_bgr, (STORE_W, STORE_H),
                                     interpolation=cv2.INTER_LINEAR)
-        kp_norm = kp_model.infer(center_bgr)  # (9, 2) normalizado [0,1]
-        kp_flat = kp_norm.flatten().astype(np.float32)  # (18,)
 
         # Imágenes left y right
         li = _nearest_before(left_ts, ts, SYNC_TOL_NS)
@@ -622,15 +724,43 @@ def process_bag(
         left_resized  = cv2.resize(left_bgr,  (STORE_W, STORE_H), interpolation=cv2.INTER_LINEAR)
         right_resized = cv2.resize(right_bgr, (STORE_W, STORE_H), interpolation=cv2.INTER_LINEAR)
 
-        # Estado [32]
-        state = np.concatenate([
-            arm_joints,          # [0:6]
-            [gripper_val],       # [6]
-            kp_flat,             # [7:25]
-            tcp_pos,             # [25:28]
-            tcp_quat,            # [28:32]
-        ]).astype(np.float32)
-        assert len(state) == STATE_DIM, f"state dim = {len(state)}"
+        state = None
+        visual_pose_rel = None
+        if state_mode == STATE_MODE_STEP4:
+            keypoints_by_camera = {
+                "left": _infer_keypoints_pixels(kp_model, left_bgr),
+                "center": _infer_keypoints_pixels(kp_model, center_bgr),
+                "right": _infer_keypoints_pixels(kp_model, right_bgr),
+            }
+            camera_poses = _lookup_camera_poses_in_base(idx.tf_tree, ts, camera_infos)
+            tcp_in_base = _make_H(tcp_pos.astype(np.float64), tcp_quat.astype(np.float64))
+            estimate = estimate_step4(
+                keypoints_by_camera=keypoints_by_camera,
+                connector_type=ct,
+                camera_infos=camera_infos,
+                camera_in_base_by_camera=camera_poses,
+                tcp_in_base=tcp_in_base,
+            )
+            if estimate is None:
+                continue
+            visual_pose_rel = estimate.pose_relative_tcp.astype(np.float32)
+            if (
+                not np.isfinite(visual_pose_rel).all()
+                or np.linalg.norm(visual_pose_rel[:3]) > 1.0
+                or np.max(np.abs(visual_pose_rel[3:])) > 4.0
+            ):
+                continue
+        else:
+            kp_norm = kp_model.infer(center_bgr)  # (9, 2) normalizado [0,1]
+            kp_flat = kp_norm.flatten().astype(np.float32)  # (18,)
+            state = np.concatenate([
+                arm_joints,          # [0:6]
+                [gripper_val],       # [6]
+                kp_flat,             # [7:25]
+                tcp_pos,             # [25:28]
+                tcp_quat,            # [28:32]
+            ]).astype(np.float32)
+            assert len(state) == STATE_DIM, f"state dim = {len(state)}"
 
         frames.append({
             "ts": ts,
@@ -640,6 +770,9 @@ def process_bag(
             "state":  state,
             "tcp_pos":  tcp_pos,
             "tcp_quat": tcp_quat,
+            "arm_joints": arm_joints,
+            "gripper_val": gripper_val,
+            "visual_pose_rel": visual_pose_rel,
             "connector_type": ct,
         })
 
@@ -657,8 +790,23 @@ def process_bag(
             dp = frames[-1]["tcp_pos"]  - frames[-2]["tcp_pos"]
             dw = _angular_velocity(frames[-2]["tcp_quat"], frames[-1]["tcp_quat"], dt)
         f["action"] = np.concatenate([dp / dt, dw]).astype(np.float32)
+        if state_mode == STATE_MODE_STEP4:
+            base_state = np.concatenate([
+                f["tcp_pos"],                         # TCP position (3)
+                f["tcp_quat"],                        # TCP quaternion (4)
+                f["action"][:3],                      # TCP linear velocity (3)
+                f["action"][3:],                      # TCP angular velocity (3)
+                np.zeros(6, dtype=np.float32),        # TCP error unavailable in this bag
+                f["arm_joints"],                      # Arm joints (6)
+                [f["gripper_val"]],                   # Gripper (1)
+            ]).astype(np.float32)
+            f["state"] = np.concatenate([
+                base_state,
+                f["visual_pose_rel"],                 # pose_relative_tcp (6)
+            ]).astype(np.float32)
+            assert len(f["state"]) == STATE_DIM, f"state dim = {len(f['state'])}"
 
-    print(f"  OK  {len(frames)} frames  conector={ct}", flush=True)
+    print(f"  OK  {len(frames)} frames  conector={ct}  state_mode={state_mode}", flush=True)
     return frames
 
 
@@ -669,7 +817,10 @@ def process_bag(
 def _get_dataset(repo_id: str, output: Path, fps: int,
                  append: bool) -> object:
     """Crea o abre un LeRobotDataset."""
-    from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+    try:
+        from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+    except ModuleNotFoundError:
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     features = {
         "observation.images.center": {
@@ -703,7 +854,6 @@ def _get_dataset(repo_id: str, output: Path, fps: int,
         print(f"Abriendo dataset existente en {output} para agregar episodios ...")
         return LeRobotDataset(repo_id=repo_id, root=output)
 
-    output.mkdir(parents=True, exist_ok=True)
     print(f"Creando nuevo LeRobotDataset en {output} ...")
     return LeRobotDataset.create(
         repo_id=repo_id,
@@ -729,9 +879,13 @@ def _add_episode(dataset, frames: List[dict], task_description: str) -> None:
             "observation.images.right":  right_rgb,
             "observation.state": f["state"],
             "action":            f["action"],
+            "task":              task_description,
         })
 
-    dataset.save_episode(task=task_description)
+    try:
+        dataset.save_episode()
+    except TypeError:
+        dataset.save_episode(task=task_description)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -785,6 +939,13 @@ def build_argparser() -> argparse.ArgumentParser:
                    help="Tipo de conector. 'auto' detecta desde /tf o nombre del bag.")
     p.add_argument("--device",     type=str, default=None,
                    help="Dispositivo para inferencia de keypoints (cuda/cpu).")
+    p.add_argument("--state_mode", choices=[STATE_MODE_LEGACY, STATE_MODE_STEP4],
+                   default=STATE_MODE_LEGACY,
+                   help=(
+                       "Formato del vector de estado. "
+                       "legacy_keypoints: 6 joints + gripper + keypoints center + TCP pose. "
+                       "step4_pose: 26D proprioceptivo + pose_relative_tcp [6D] usando Step 4."
+                   ))
     p.add_argument("--append",     action="store_true",
                    help="Si el dataset ya existe, agrega episodios en lugar de sobreescribir.")
     p.add_argument("--max_bags",   type=int, default=None,
@@ -810,6 +971,9 @@ def main() -> int:
     kp_sfp = KeypointInferencer(args.ckpt_sfp, device=args.device)
     print(f"  SC  → {args.ckpt_sc.name}  device={kp_sc.device}")
     print(f"  SFP → {args.ckpt_sfp.name}  device={kp_sfp.device}")
+    camera_infos = _default_camera_infos() if args.state_mode == STATE_MODE_STEP4 else None
+    if args.state_mode == STATE_MODE_STEP4:
+        print("  Step 4 activo: usando camera_info fijo de la simulación AIC actual")
 
     # Recolectar bags
     bags = _collect_bag_paths(args.bags_dir)
@@ -837,6 +1001,8 @@ def main() -> int:
             kp_sfp=kp_sfp,
             connector_type=ct_arg,
             target_fps=args.fps,
+            state_mode=args.state_mode,
+            camera_infos=camera_infos,
         )
         if frames is None:
             n_skip += 1
@@ -857,11 +1023,14 @@ def main() -> int:
         return 1
 
     print(f"\nConsolidando dataset ({n_ok} episodios, {n_skip} skipped) ...")
-    try:
-        dataset.consolidate(run_compute_stats=True)
-    except Exception as e:
-        print(f"  [WARN] consolidate() falló: {e}")
-        print(f"  El dataset puede estar incompleto pero los episodios están guardados.")
+    if hasattr(dataset, "consolidate"):
+        try:
+            dataset.consolidate(run_compute_stats=True)
+        except Exception as e:
+            print(f"  [WARN] consolidate() falló: {e}")
+            print(f"  El dataset puede estar incompleto pero los episodios están guardados.")
+    else:
+        print("  consolidate() no aplica para esta versión de LeRobot.")
 
     elapsed_total = time.time() - t0
     print()

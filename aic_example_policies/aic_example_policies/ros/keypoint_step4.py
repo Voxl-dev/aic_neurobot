@@ -402,7 +402,14 @@ def estimate_pose_relative_tcp_from_multiview(
         return None
 
     port_in_tcp = invert_rigid(tcp_in_base) @ fused_port_in_base
+    if (
+        not np.isfinite(port_in_tcp).all()
+        or np.linalg.norm(port_in_tcp[:3, 3]) > 1.0
+    ):
+        return None
     pose_relative_tcp = mat4_to_pose6d_relative(port_in_tcp)
+    if not np.isfinite(pose_relative_tcp).all():
+        return None
     return Step4PoseEstimate(
         pose_relative_tcp=pose_relative_tcp,
         port_in_base=fused_port_in_base,

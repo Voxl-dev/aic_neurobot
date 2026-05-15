@@ -22,42 +22,69 @@ import json
 import sys
 from pathlib import Path
 
-from omegaconf import OmegaConf
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from aic_model.load_act import load_pretrained_act_for_aic
-from lerobot.common.policies.act.configuration_act import ACTConfig
+from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
+from lerobot.policies.act.configuration_act import ACTConfig
 
 
 OUTPUT_DIR = REPO_ROOT / "outputs" / "init_smart_ckpt"
 CONFIG_PATH = REPO_ROOT / "configs" / "act_aic.yaml"
 
 
+def _feature_type(name: str) -> FeatureType:
+    if name == "action":
+        return FeatureType.ACTION
+    if name == "observation.state":
+        return FeatureType.STATE
+    if name.startswith("observation.images."):
+        return FeatureType.VISUAL
+    raise ValueError(f"Unsupported ACT feature: {name}")
+
+
+def _normalization_mode(name: str) -> NormalizationMode:
+    return NormalizationMode[name.upper()]
+
+
 def build_act_config(cfg) -> ACTConfig:
-    p = cfg.policy
+    p = cfg["policy"]
+    input_features = {
+        k: PolicyFeature(type=_feature_type(k), shape=tuple(v))
+        for k, v in p["input_shapes"].items()
+    }
+    output_features = {
+        k: PolicyFeature(type=_feature_type(k), shape=tuple(v))
+        for k, v in p["output_shapes"].items()
+    }
+    normalization_mapping = {
+        **{k: _normalization_mode(v) for k, v in p["input_normalization_modes"].items()},
+        **{k: _normalization_mode(v) for k, v in p["output_normalization_modes"].items()},
+    }
+
     return ACTConfig(
-        chunk_size=p.chunk_size,
-        n_action_steps=p.n_action_steps,
-        input_shapes={k: list(v) for k, v in p.input_shapes.items()},
-        output_shapes={k: list(v) for k, v in p.output_shapes.items()},
-        input_normalization_modes=dict(p.input_normalization_modes),
-        output_normalization_modes=dict(p.output_normalization_modes),
-        vision_backbone=p.vision_backbone,
-        pretrained_backbone_weights=p.pretrained_backbone_weights,
-        replace_final_stride_with_dilation=p.replace_final_stride_with_dilation,
-        pre_norm=p.pre_norm,
-        dim_model=p.dim_model,
-        n_heads=p.n_heads,
-        dim_feedforward=p.dim_feedforward,
-        feedforward_activation=p.feedforward_activation,
-        n_encoder_layers=p.n_encoder_layers,
-        n_decoder_layers=p.n_decoder_layers,
-        use_vae=p.use_vae,
-        latent_dim=p.latent_dim,
-        n_vae_encoder_layers=p.n_vae_encoder_layers,
-        kl_weight=p.kl_weight,
+        chunk_size=p["chunk_size"],
+        n_action_steps=p["n_action_steps"],
+        input_features=input_features,
+        output_features=output_features,
+        normalization_mapping=normalization_mapping,
+        vision_backbone=p["vision_backbone"],
+        pretrained_backbone_weights=p["pretrained_backbone_weights"],
+        replace_final_stride_with_dilation=p["replace_final_stride_with_dilation"],
+        pre_norm=p["pre_norm"],
+        dim_model=p["dim_model"],
+        n_heads=p["n_heads"],
+        dim_feedforward=p["dim_feedforward"],
+        feedforward_activation=p["feedforward_activation"],
+        n_encoder_layers=p["n_encoder_layers"],
+        n_decoder_layers=p["n_decoder_layers"],
+        use_vae=p["use_vae"],
+        latent_dim=p["latent_dim"],
+        n_vae_encoder_layers=p["n_vae_encoder_layers"],
+        kl_weight=p["kl_weight"],
     )
 
 
@@ -97,11 +124,12 @@ def main():
     print("PREPARE CHECKPOINT — smart partial init para AIC")
     print("=" * 70)
 
-    cfg = OmegaConf.load(CONFIG_PATH)
+    with open(CONFIG_PATH, "r") as f:
+        cfg = yaml.safe_load(f)
     act_config = build_act_config(cfg)
     print(f"[prepare_checkpoint] Config leída de {CONFIG_PATH}")
-    print(f"[prepare_checkpoint] State dim AIC: {act_config.input_shapes['observation.state']}")
-    print(f"[prepare_checkpoint] Action dim AIC: {act_config.output_shapes['action']}")
+    print(f"[prepare_checkpoint] State dim AIC: {act_config.input_features['observation.state'].shape}")
+    print(f"[prepare_checkpoint] Action dim AIC: {act_config.output_features['action'].shape}")
 
     policy = load_pretrained_act_for_aic(act_config, smart_init=True, verbose=True)
 

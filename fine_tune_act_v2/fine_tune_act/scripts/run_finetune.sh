@@ -1,80 +1,79 @@
 #!/usr/bin/env bash
-# Lanza el fine-tune ACT completo.
+# Fine-tune ACT para AIC con LeRobot 0.5.x.
 #
-# Modos:
-#   bash scripts/run_finetune.sh          # full (5-6h, backbone entrenable)
-#   bash scripts/run_finetune.sh --fast   # fast (1.5-2h, backbone congelado)
-#
-# Prerequisito: el dataset HF LeRobotDataset YA debe estar en data/dataset_lerobot/
-# (correr primero: pixi run python scripts/bag_to_lerobot.py ...)
+# Variables útiles:
+#   ACT_STEPS=1000          pasos de entrenamiento
+#   BATCH_SIZE=4            batch si la GPU va justa
+#   NUM_WORKERS=2           workers de dataloader
+#   OUTPUT_DIR=...          carpeta de salida
+#   DATASET_ROOT=...        dataset LeRobot local
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
+PROJECT_ROOT="$(cd "$REPO_ROOT/../.." && pwd)"
+cd "$PROJECT_ROOT"
 
-FAST_MODE=false
-for arg in "$@"; do
-  [[ "$arg" == "--fast" ]] && FAST_MODE=true
-done
+INIT_CKPT="$REPO_ROOT/outputs/init_smart_ckpt"
+MIGRATED_CKPT="$REPO_ROOT/outputs/init_smart_ckpt_migrated"
 
-# ── PASO 1: Preparar checkpoint con smart partial init ──────────────────────
-echo "════════════════════════════════════════════════════════════════════"
-echo "  PASO 1/2 — Preparar checkpoint con smart partial init (~3 min)"
-echo "════════════════════════════════════════════════════════════════════"
-pixi run python scripts/prepare_checkpoint.py
+DATASET_ROOT="${DATASET_ROOT:-$PROJECT_ROOT/data/dataset_lerobot_step4}"
+DATASET_REPO_ID="${DATASET_REPO_ID:-aic_team/sfp_sc_insertion_step4}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/act_aic_run1}"
+ACT_STEPS="${ACT_STEPS:-60000}"
+BATCH_SIZE="${BATCH_SIZE:-8}"
+NUM_WORKERS="${NUM_WORKERS:-4}"
+SAVE_FREQ="${SAVE_FREQ:-5000}"
+LOG_FREQ="${LOG_FREQ:-200}"
+DEVICE="${DEVICE:-cuda}"
 
-echo ""
+echo "===================================================================="
+echo "  PASO 1/3 — Preparar checkpoint ACT con smart partial init"
+echo "===================================================================="
+pixi run python "$REPO_ROOT/scripts/prepare_checkpoint.py"
 
-# ── PASO 2: Fine-tune ───────────────────────────────────────────────────────
-if [[ "$FAST_MODE" == "true" ]]; then
-  echo "════════════════════════════════════════════════════════════════════"
-  echo "  PASO 2/2 — FAST MODE: backbone congelado + imágenes 240×320"
-  echo "  10k steps · batch=16 · lr=5e-5 · img=240×320 · ~10-15 min"
-  echo "════════════════════════════════════════════════════════════════════"
-  echo "  Output: outputs/act_fast_run1/"
-  echo "  NOTA: política resultante espera imágenes 240×320 en inferencia."
-  echo ""
-  pixi run python scripts/train_act_fast.py \
-    --steps      10000 \
-    --batch_size 16    \
-    --lr         5e-5  \
-    --warmup     300   \
-    --img_height 240   \
-    --img_width  320   \
-    --save_freq  2000  \
-    --output_dir outputs/act_fast_run1 \
-    --ckpt       "$REPO_ROOT/outputs/init_smart_ckpt"
+echo
+echo "===================================================================="
+echo "  PASO 2/3 — Migrar checkpoint al formato processor de LeRobot 0.5.x"
+echo "===================================================================="
+if [[ -f "$MIGRATED_CKPT/policy_preprocessor.json" && -f "$MIGRATED_CKPT/policy_postprocessor.json" ]]; then
+  echo "  Checkpoint migrado ya existe: $MIGRATED_CKPT"
 else
-  echo "════════════════════════════════════════════════════════════════════"
-  echo "  PASO 2/2 — FULL MODE: lerobot-train oficial (5-6h)"
-  echo "  60k steps · batch=8 · lr=1e-5 · backbone entrenable"
-  echo "════════════════════════════════════════════════════════════════════"
-  echo "  Output: outputs/act_aic_run1/"
-  echo "  Checkpoints cada 5000 steps (~25 min)"
-  echo ""
-  pixi run lerobot-train \
-    --config-path="$REPO_ROOT/configs" \
-    --config-name=act_aic \
-    policy.pretrained_path="$REPO_ROOT/outputs/init_smart_ckpt" \
-    hydra.run.dir=outputs/act_aic_run1
+  MIGRATE_SCRIPT="$(pixi run python -c 'import pathlib, lerobot.processor.migrate_policy_normalization as m; print(pathlib.Path(m.__file__))')"
+  pixi run python "$MIGRATE_SCRIPT" --pretrained-path "$INIT_CKPT"
 fi
 
-echo ""
-echo "════════════════════════════════════════════════════════════════════"
+echo
+echo "===================================================================="
+echo "  PASO 3/3 — Entrenar ACT"
+echo "===================================================================="
+echo "  Dataset : $DATASET_ROOT"
+echo "  Output  : $OUTPUT_DIR"
+echo "  Steps   : $ACT_STEPS"
+echo "  Batch   : $BATCH_SIZE"
+echo "  Device  : $DEVICE"
+echo
+
+pixi run lerobot-train \
+  --policy.path="$MIGRATED_CKPT" \
+  --policy.device="$DEVICE" \
+  --policy.push_to_hub=false \
+  --policy.use_amp=true \
+  --dataset.repo_id="$DATASET_REPO_ID" \
+  --dataset.root="$DATASET_ROOT" \
+  --dataset.video_backend=pyav \
+  --output_dir="$OUTPUT_DIR" \
+  --job_name=act_aic_v1 \
+  --steps="$ACT_STEPS" \
+  --batch_size="$BATCH_SIZE" \
+  --num_workers="$NUM_WORKERS" \
+  --eval_freq=0 \
+  --save_freq="$SAVE_FREQ" \
+  --log_freq="$LOG_FREQ" \
+  --wandb.enable=false
+
+echo
+echo "===================================================================="
 echo "  FINE-TUNE COMPLETADO"
-echo "════════════════════════════════════════════════════════════════════"
-if [[ "$FAST_MODE" == "true" ]]; then
-  echo "  Checkpoint final: outputs/act_fast_run1/checkpoints/step_010000/"
-else
-  echo "  Checkpoint final: outputs/act_aic_run1/checkpoints/last/"
-fi
-echo ""
-echo "  Para copiarlo al modelo final:"
-echo "    mkdir -p models/act_policy"
-if [[ "$FAST_MODE" == "true" ]]; then
-  echo "    cp outputs/act_fast_run1/checkpoints/step_010000/* models/act_policy/"
-else
-  echo "    cp outputs/act_aic_run1/checkpoints/last/* models/act_policy/"
-fi
-echo ""
+echo "===================================================================="
+echo "  Checkpoints en: $OUTPUT_DIR/checkpoints/"

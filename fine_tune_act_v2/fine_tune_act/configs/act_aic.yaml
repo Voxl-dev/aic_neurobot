@@ -1,18 +1,12 @@
-# Fine-tune ACT para AIC Challenge — UR5e + 3 Basler + Axia80
-# Partiendo del checkpoint lerobot/act_aloha_sim_insertion_scripted (HuggingFace Hub)
-# Optimizado para RTX 2000 Ada 8GB
+# Fine-tune ACT para AIC Challenge — UR5e + 3 cámaras + estado 32D
 
 defaults:
   - _self_
 
-# ─── POLICY ────────────────────────────────────────────────────────────────
 policy:
   type: act
-  # Este campo lo sobrescribe run_finetune.sh apuntando al checkpoint con
-  # smart partial init ya aplicado (outputs/init_smart_ckpt/).
-  pretrained_path: lerobot/act_aloha_sim_insertion_scripted
+  pretrained_path: lerobot/act_aloha_sim_insertion_human
 
-  # Arquitectura (debe matchear al checkpoint base para reusar pesos)
   vision_backbone: resnet18
   pretrained_backbone_weights: ResNet18_Weights.IMAGENET1K_V1
   replace_final_stride_with_dilation: false
@@ -24,42 +18,35 @@ policy:
   n_encoder_layers: 4
   n_decoder_layers: 1
 
-  # Action chunking
   chunk_size: 20
   n_action_steps: 20
 
-  # VAE (mantener como en ACT original)
   use_vae: true
   latent_dim: 32
   n_vae_encoder_layers: 4
   kl_weight: 10.0
 
-  # I/O shapes — específicos del AIC
   input_shapes:
     observation.images.center: [3, 480, 640]
-    observation.images.left:   [3, 480, 640]
-    observation.images.right:  [3, 480, 640]
-    observation.state:         [32]      # 7 joint pos + 25 keypoint coords
+    observation.images.left: [3, 480, 640]
+    observation.images.right: [3, 480, 640]
+    observation.state: [32]
   output_shapes:
-    action: [6]                          # Twist vx,vy,vz,wx,wy,wz
+    action: [6]
 
   input_normalization_modes:
     observation.images.center: mean_std
-    observation.images.left:   mean_std
-    observation.images.right:  mean_std
-    observation.state:         min_max
+    observation.images.left: mean_std
+    observation.images.right: mean_std
+    observation.state: min_max
   output_normalization_modes:
     action: min_max
 
-# ─── DATASET ───────────────────────────────────────────────────────────────
 dataset:
-  repo_id: aic_team/sfp_sc_insertion
-  root: data/dataset_lerobot
+  repo_id: aic_team/sfp_sc_insertion_step4
+  root: data/dataset_lerobot_step4
   episodes: null
 
-# ─── TRAINING ──────────────────────────────────────────────────────────────
-# FULL MODE (default): backbone entrenable, ~5-6h en RTX 2000 Ada
-#   bash scripts/run_finetune.sh
 training:
   offline_steps: 60000
   online_steps: 0
@@ -69,28 +56,18 @@ training:
   lr_backbone: 1.0e-5
   weight_decay: 1.0e-4
   grad_clip_norm: 10.0
-  save_freq: 5000                        # checkpoint cada ~25 min — seguro contra crash
+  save_freq: 5000
   log_freq: 200
   eval_freq: 0
   use_amp: true
 
-# FAST MODE: backbone congelado (requires_grad=False), ~1.5-2h en RTX 2000 Ada
-#   bash scripts/run_finetune.sh --fast   ← usa train_act_fast.py, no lerobot-train
-#
-# Los parámetros de fast mode van hardcodeados en train_act_fast.py:
-#   steps=25000, batch_size=12, lr=3e-5, warmup=500
-# weight_decay y grad_clip_norm se leen de este yaml en ambos modos.
-
-# ─── OPTIMIZER ─────────────────────────────────────────────────────────────
 optimizer:
   type: adamw
   lr_warmup_steps: 1000
 
-# ─── ENV (no usar durante offline training) ────────────────────────────────
 env:
   type: null
 
-# ─── HYDRA ─────────────────────────────────────────────────────────────────
 hydra:
   run:
     dir: outputs/act_aic_run1
