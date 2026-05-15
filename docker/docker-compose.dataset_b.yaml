@@ -1,0 +1,74 @@
+# Docker Compose para generación de Dataset B (CheatCode) y calibración F/T.
+#
+# Alternativa a distrobox para WSL — no requiere pixi ni distrobox.
+#
+# Uso rápido:
+#   # 1. Levantar simulación + contenedor de herramientas
+#   docker compose -f docker/docker-compose.dataset_b.yaml up -d eval tools
+#
+#   # 2. Abrir una shell en el contenedor de herramientas (equivalente a distrobox enter)
+#   docker exec -it aic_dataset_b-tools-1 bash
+#
+#   # 3. Desde esa shell ya puedes ejecutar: ros2 service call ..., ros2 bag record ..., etc.
+#
+# Variables de entorno opcionales:
+#   BAGS_DIR   — Ruta del host donde se guardan los bags (default: /tmp)
+#                Ejemplo: BAGS_DIR=/home/diego/aic_bags docker compose ... up -d eval tools
+#   DISPLAY    — Display X11 para Gazebo GUI (default: :0)
+
+name: aic_dataset_b
+
+services:
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # eval — Simulación Gazebo con ground_truth + engine
+  # ─────────────────────────────────────────────────────────────────────────
+  eval:
+    image: ghcr.io/intrinsic-dev/aic/aic_eval
+    command: >
+      gazebo_gui:=false
+      ground_truth:=true
+      start_aic_engine:=true
+      shutdown_on_aic_engine_exit:=true
+      model_discovery_timeout_seconds:=60
+    environment:
+      AIC_EVAL_PASSWD: CHANGE_IN_PROD
+      AIC_MODEL_PASSWD: CHANGE_IN_PROD
+      DISPLAY: ${DISPLAY:-:0}
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    networks:
+      - aic_net
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # tools — Herramientas ROS 2 (tare, bag record, run policy)
+  #
+  # Se conecta al router Zenoh del contenedor eval como peer.
+  # Monta las policies desde el source del repo para que los cambios
+  # (ej. FTCalibrationSampler.py) sean visibles sin rebuild.
+  # ─────────────────────────────────────────────────────────────────────────
+  tools:
+    image: ghcr.io/intrinsic-dev/aic/aic_eval
+    entrypoint: ["/bin/bash", "/tools_entrypoint.sh"]
+    environment:
+      RMW_IMPLEMENTATION: rmw_zenoh_cpp
+      # Peer mode — conecta al router Zenoh levantado por el contenedor eval
+      ZENOH_CONFIG_OVERRIDE: 'connect/endpoints=["tcp/eval:7447"];transport/shared_memory/enabled=false'
+    volumes:
+      # Script de entrypoint (desde el repo)
+      - ./aic_tools/tools_entrypoint.sh:/tools_entrypoint.sh:ro
+      # Policies desde source: FTCalibrationSampler y cualquier policy custom
+      # se cargan directamente sin necesidad de rebuild ni cp manual.
+      - ../aic_example_policies/aic_example_policies:/ws_aic/install/lib/python3.12/site-packages/aic_example_policies:ro
+      # Directorio de salida para bags en el host
+      - ${BAGS_DIR:-/tmp}:/bags
+    networks:
+      - aic_net
+    depends_on:
+      - eval
+    stdin_open: true
+    tty: true
+
+networks:
+  aic_net:
+    internal: false
