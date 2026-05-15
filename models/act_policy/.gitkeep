@@ -1,0 +1,8 @@
+# Pon aquí el checkpoint ACT entrenado:
+#   config.json
+#   model.safetensors
+#
+# Genera con:
+#   cd fine_tune_act_v2/fine_tune_act
+#   bash scripts/run_finetune.sh --fast
+#   cp -r outputs/act_fast_run1/checkpoints/step_010000/* ../../models/act_policy/

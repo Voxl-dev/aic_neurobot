@@ -1,0 +1,3 @@
+# Pon aquí los checkpoints de keypoints:
+#   best_sc.pt   (copia desde fine_tune_act_v2/keypoints/keypoint_sc_*/best_sc.pt)
+#   best_sfp.pt  (copia desde fine_tune_act_v2/keypoints/keypoint_sfp_v2/best_sfp.pt)
