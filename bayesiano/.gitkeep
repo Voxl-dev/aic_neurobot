@@ -1,0 +1,8 @@
+# Calibración F/T del Axia80. Genera con:
+#   pixi run python tools/calibrate_ft.py
+# Archivos resultantes:
+#   calibration_results.csv
+#   bag_trial_*/fts_broadcaster__wrench.csv
+#
+# Si este directorio está vacío, NeuroPolicy usa los valores de calibración
+# por defecto (hardcodeados en bayesian_estimator.py).
