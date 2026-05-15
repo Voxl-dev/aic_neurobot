@@ -26,6 +26,7 @@ import numpy as np
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PACKAGE_CALIBRATION_CSV = Path(__file__).with_name("calibration_results.csv")
 DEFAULT_CALIBRATION_CSV = PROJECT_ROOT / "bayesiano" / "calibration_results.csv"
 DEFAULT_BAYESIAN_DATA_DIR = PROJECT_ROOT / "bayesiano"
 _FLAT_WRENCH_KEYS = (
@@ -61,7 +62,7 @@ class Calibration:
     r2_rz: float = 0.4668
 
     @classmethod
-    def from_csv(cls, path: str | Path = DEFAULT_CALIBRATION_CSV) -> "Calibration":
+    def from_csv(cls, path: str | Path = PACKAGE_CALIBRATION_CSV) -> "Calibration":
         """Load GAIN_* and BIAS_* values exported by tools/calibrate_ft.py."""
         path = Path(path)
         values: dict[str, float] = {}
@@ -206,13 +207,19 @@ class Axia80BayesianEstimator:
     @classmethod
     def from_project_files(
         cls,
-        calibration_csv: str | Path = DEFAULT_CALIBRATION_CSV,
+        calibration_csv: str | Path | None = None,
         data_dir: str | Path = DEFAULT_BAYESIAN_DATA_DIR,
         infer_sensor_noise: bool = True,
         **kwargs,
     ) -> "Axia80BayesianEstimator":
-        """Create an estimator using the files stored in the bayesiano folder."""
-        calibration = Calibration.from_csv(calibration_csv)
+        """Create an estimator using packaged calibration plus optional data.
+
+        The large bayesiano/ folder is ignored by Git. Therefore, the packaged
+        calibration shipped with aic_model is the runtime default. If a
+        calibration_csv path is provided, that file is used when present and the
+        packaged calibration remains the fallback.
+        """
+        calibration = _load_calibration(calibration_csv)
         sensor_noise = kwargs.pop("sensor_noise", None)
         if infer_sensor_noise and sensor_noise is None:
             sensor_noise = infer_axia80_noise_from_trials(data_dir)
@@ -427,7 +434,19 @@ def fit_linear_calibration(
 
 def _load_default_calibration() -> Calibration:
     if DEFAULT_CALIBRATION_CSV.exists():
-        return Calibration.from_csv(DEFAULT_CALIBRATION_CSV)
+        return _load_calibration(DEFAULT_CALIBRATION_CSV)
+    return _load_calibration()
+
+
+def _load_calibration(path: str | Path | None = None) -> Calibration:
+    candidates: list[Path] = []
+    if path is not None:
+        candidates.append(Path(path))
+    candidates.append(PACKAGE_CALIBRATION_CSV)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return Calibration.from_csv(candidate)
     return Calibration()
 
 
