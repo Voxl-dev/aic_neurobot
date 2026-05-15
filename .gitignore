@@ -3,6 +3,7 @@ __pycache__/
 *.egg-info/
 build/
 files.txt
+.venv/
 
 # pixi environments
 .pixi/*
@@ -36,3 +37,6 @@ camera_bags
 eval_bag_summary_plots
 extracted_eval_bags_csv
 outputs/
+
+# Ignore Bayesian files for the calibration of the GAINs
+bayesiano/
