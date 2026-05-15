@@ -31,3 +31,8 @@ aic_neurobot/docs_neurobot/Claude_information
 bag_trial_1_20260512_190629_607
 bag_trial_2_20260512_190737_082
 bag_trial_3_20260512_190908_253
+dataset_A
+camera_bags
+eval_bag_summary_plots
+extracted_eval_bags_csv
+outputs/

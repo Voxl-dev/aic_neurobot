@@ -1,0 +1,16 @@
+# Pegar este bloque en el pixi.toml del repo intrinsic-dev/aic
+# bajo la sección [pypi-dependencies] (crear si no existe)
+
+[pypi-dependencies]
+lerobot = { version = ">=0.1.0", extras = ["act"] }
+huggingface_hub = "*"
+safetensors = "*"
+rosbags = "*"           # para leer bags ROS 2 sin necesidad de tener rclpy
+opencv-python = "*"
+omegaconf = "*"
+scipy = "*"
+pandas = "*"
+av = "*"                # codec mp4 para LeRobotDataset videos
+
+# Después de pegar: ejecutar
+#   pixi install
