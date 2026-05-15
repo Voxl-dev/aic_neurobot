@@ -402,17 +402,26 @@ xdg-open ~/aic_datasets/dataset_A/images/0000000_center.png
 
 ---
 
-### 3.2 Dataset B — CheatCode masivo
+### 3.2 Dataset B — Calibración F/T para el estimador Bayesiano
 
-> **Prerequisito para los terminales ROS 2 (2, 3 y 4)**
+**Para qué:** Generar los datos que permiten calibrar los parámetros
+(`GAIN_X`, `GAIN_Y`, `GAIN_Rz`, `BIAS_*`) del estimador Bayesiano de contacto.
+La policy `FTCalibrationSampler` posiciona el cable tip en 9 offsets XY
+controlados respecto al puerto, manteniendo cada posición 30 s para que el
+sensor F/T se estabilice.
+
+**Duración:** 9 posiciones × 30 s = ~4.5 min de tiempo simulado.
+Con la física del cable activa el simulador puede correr hasta ~77× más lento
+que el tiempo real; estimar ~6-7 h de tiempo real para la secuencia completa.
+Parar antes no invalida el bag — cada fase completa es un punto de datos útil.
+
+> **Prerequisito para los terminales 2, 3 y 4**
 >
-> `pixi` **no está disponible en WSL**. En su lugar se entra al contenedor
-> `aic_eval` con `distrobox` y se configura el entorno manualmente. Ejecutar
-> esto **al principio de cada terminal** antes de cualquier comando ROS 2:
+> `pixi` no está disponible en WSL. Ejecutar esto **al inicio de cada terminal**:
 >
 > ```bash
 > distrobox enter -r aic_eval
-> # [sudo] password for diego: <contraseña>
+> # Primera vez: pide crear contraseña sudo dentro del contenedor
 >
 > # Dentro del contenedor (prompt cambia a diego@aic_eval):
 > source /ws_aic/install/setup.bash
@@ -420,11 +429,23 @@ xdg-open ~/aic_datasets/dataset_A/images/0000000_center.png
 > export ZENOH_CONFIG_OVERRIDE=';transport/shared_memory/enabled=false'
 > ```
 
+**Prerequisito — copiar la policy al workspace del contenedor (una sola vez):**
+
+```bash
+# Dentro del contenedor (Terminal 2, 3 o 4 con el entorno ya configurado)
+sudo cp \
+  /mnt/c/Users/diegu/Documents/mis_proyectos/robotica/aic/aic_example_policies/aic_example_policies/ros/FTCalibrationSampler.py \
+  /ws_aic/install/lib/python3.12/site-packages/aic_example_policies/ros/
+```
+
+> Con Docker (`docker-compose.dataset_b.yaml`) este paso NO es necesario —
+> el servicio `tools` monta el source directamente.
+
+---
+
 **Terminal 1 — Simulación con ground truth y engine activo:**
 
 ```bash
-# Esta terminal NO necesita entrar al contenedor manualmente —
-# usa el flag "--" para pasar el comando directamente.
 distrobox enter -r aic_eval -- /entrypoint.sh \
   gazebo_gui:=false \
   ground_truth:=true \
@@ -433,173 +454,7 @@ distrobox enter -r aic_eval -- /entrypoint.sh \
   model_discovery_timeout_seconds:=60
 ```
 
-**Terminal 2 — Tare del F/T sensor (antes de cada sesión):**
-
-```bash
-# Entrar al contenedor y configurar entorno (ver Prerequisito arriba)
-distrobox enter -r aic_eval
-source /ws_aic/install/setup.bash
-export RMW_IMPLEMENTATION=rmw_zenoh_cpp
-export ZENOH_CONFIG_OVERRIDE=';transport/shared_memory/enabled=false'
-
-# Ejecutar el tare
-ros2 service call \
-  /aic_controller/tare_force_torque_sensor std_srvs/srv/Trigger
-```
-
-**Terminal 3 — Grabar topics con ros2 bag:**
-
-> **Nota de permisos:** el contenedor rootful crea archivos como `root`.
-> Grabar en `/tmp/` evita problemas de permisos. Después del episodio,
-> mover a `~/aic_datasets/` y aplicar:
-> `sudo chown -R diego:diego ~/aic_datasets`
-
-```bash
-distrobox enter -r aic_eval
-source /ws_aic/install/setup.bash
-export RMW_IMPLEMENTATION=rmw_zenoh_cpp
-export ZENOH_CONFIG_OVERRIDE=';transport/shared_memory/enabled=false'
-
-ros2 bag record \
-  -o /tmp/cheatcode_$(date +%Y%m%d_%H%M%S) \
-  /left_camera/image \
-  /center_camera/image \
-  /right_camera/image \
-  /aic_controller/controller_state \
-  /fts_broadcaster/wrench \
-  /joint_states \
-  /aic_controller/pose_commands \
-  /tf \
-  /tf_static \
-  /scoring/insertion_event
-```
-
-**Terminal 4 — Correr CheatCode:**
-
-```bash
-distrobox enter -r aic_eval
-source /ws_aic/install/setup.bash
-export RMW_IMPLEMENTATION=rmw_zenoh_cpp
-export ZENOH_CONFIG_OVERRIDE=';transport/shared_memory/enabled=false'
-
-ros2 run aic_model aic_model --ros-args \
-  -p use_sim_time:=true \
-  -p policy:=aic_example_policies.ros.CheatCode
-```
-
-**Verificación del bag:**
-
-```bash
-# Dentro del contenedor (mismo entorno que Terminal 3/4)
-ros2 bag info /tmp/cheatcode_TIMESTAMP
-
-# Verificar F/T razonable (~0N en reposo post-tare)
-ros2 bag play /tmp/cheatcode_TIMESTAMP --loop &
-ros2 topic echo /fts_broadcaster/wrench --once
-```
-
----
-
-#### Alternativa — Docker puro (sin distrobox)
-
-Si `distrobox` no está disponible (ej. Docker Desktop en WSL sin Podman
-rootful), usar `docker/docker-compose.dataset_b.yaml`. Levanta dos servicios:
-
-| Servicio | Rol |
-|----------|-----|
-| `eval`   | Gazebo + engine (Terminal 1) |
-| `tools`  | Workspace ROS 2 conectado al router Zenoh de `eval` (Terminales 2, 3, 4) |
-
-El servicio `tools` monta `aic_example_policies/` desde el source del repo,
-por lo que políticas nuevas (como `FTCalibrationSampler`) son visibles sin
-rebuild ni copia manual.
-
-**Paso 0 — Preparar directorio de bags (una sola vez):**
-
-```bash
-mkdir -p ~/aic_bags
-```
-
-**Terminal 1 — Levantar simulación + contenedor de herramientas:**
-
-```bash
-# Desde la raíz del repo
-BAGS_DIR=~/aic_bags \
-  docker compose -f docker/docker-compose.dataset_b.yaml up -d eval tools
-
-# Ver logs de Gazebo (esperar "Simulation is running")
-docker compose -f docker/docker-compose.dataset_b.yaml logs -f eval
-```
-
-**Terminales 2, 3 y 4 — Cada terminal abre una shell en `tools`:**
-
-```bash
-# Equivalente a: distrobox enter -r aic_eval + source + export
-docker exec -it aic_dataset_b-tools-1 bash
-```
-
-Desde esa shell ejecutar los mismos comandos que en el flujo distrobox
-(sin el bloque de prerequisito — ya está configurado en el entrypoint):
-
-```bash
-# Terminal 2 — Tare
-ros2 service call /aic_controller/tare_force_torque_sensor std_srvs/srv/Trigger
-
-# Terminal 3 — Bag (los bags van a /bags dentro del contenedor = ~/aic_bags en el host)
-ros2 bag record \
-  -o /bags/cheatcode_$(date +%Y%m%d_%H%M%S) \
-  /left_camera/image /center_camera/image /right_camera/image \
-  /aic_controller/controller_state /fts_broadcaster/wrench \
-  /joint_states /aic_controller/pose_commands /tf /tf_static \
-  /scoring/insertion_event
-
-# Terminal 4 — CheatCode
-ros2 run aic_model aic_model --ros-args \
-  -p use_sim_time:=true \
-  -p policy:=aic_example_policies.ros.CheatCode
-```
-
-**Detener todo:**
-
-```bash
-docker compose -f docker/docker-compose.dataset_b.yaml down
-```
-
-> El mismo `docker-compose.dataset_b.yaml` y el servicio `tools` se usan
-> para la calibración F/T (§3.2.1) — no es necesario un segundo compose.
-
----
-
-### 3.2.1 Calibración F/T — FTCalibrationSampler
-
-Genera un bag de calibración con 9 posiciones laterales controladas del tip del cable
-respecto al puerto. Se procesa con `tools/calibrate_ft.py` para obtener los valores
-`GAIN_X`, `GAIN_Y`, `GAIN_Rz` y `BIAS_*` del estimador Bayesiano de contacto.
-
-**Cuándo ejecutarlo:** antes de entrenar la Capa 3 (SAC residual) o cuando se
-actualice el cable/gripper en la simulación.
-
-**Duración:** 9 posiciones × 30 s hold = ~4.5 min de tiempo simulado.
-Con el sim corriendo a velocidad nominal esto puede tardar más en tiempo real
-dependiendo de la carga de la física del cable.
-
-> **Con Docker (sin distrobox):** usar el mismo `docker-compose.dataset_b.yaml`
-> de §3.2. El servicio `tools` ya tiene el workspace y las políticas disponibles.
-> Solo reemplazar `distrobox enter -r aic_eval` por
-> `docker exec -it aic_dataset_b-tools-1 bash` en los Terminales 2, 3 y 4.
-
-**Terminal 1 — Simulación con ground truth (igual que Dataset B):**
-
-```bash
-distrobox enter -r aic_eval -- /entrypoint.sh \
-  gazebo_gui:=false \
-  ground_truth:=true \
-  start_aic_engine:=true \
-  shutdown_on_aic_engine_exit:=true \
-  model_discovery_timeout_seconds:=60
-```
-
-**Terminal 2 — Tare del sensor antes de arrancar:**
+**Terminal 2 — Tare del sensor F/T (antes de arrancar):**
 
 ```bash
 distrobox enter -r aic_eval
@@ -609,9 +464,13 @@ export ZENOH_CONFIG_OVERRIDE=';transport/shared_memory/enabled=false'
 
 ros2 service call \
   /aic_controller/tare_force_torque_sensor std_srvs/srv/Trigger
+# Respuesta esperada: success=True, message='Successfully tared force torque sensor.'
 ```
 
-**Terminal 3 — Grabar (solo los topics que usa la calibración):**
+**Terminal 3 — Grabar bag de calibración:**
+
+> Los bags se crean en `/tmp/` para evitar problemas de permisos del contenedor
+> rootful. Moverlos después con `sudo chown -R diego:diego ~/aic_datasets`.
 
 ```bash
 distrobox enter -r aic_eval
@@ -620,14 +479,15 @@ export RMW_IMPLEMENTATION=rmw_zenoh_cpp
 export ZENOH_CONFIG_OVERRIDE=';transport/shared_memory/enabled=false'
 
 ros2 bag record \
-  -o /tmp/ft_calib_$(date +%Y%m%d_%H%M%S) \
-  /fts_broadcaster/wrench \
-  /joint_states \
-  /tf \
-  /tf_static
+  --topics \
+    /fts_broadcaster/wrench \
+    /joint_states \
+    /tf \
+    /tf_static \
+  -o /tmp/ft_calib_$(date +%Y%m%d_%H%M%S)
 ```
 
-**Terminal 4 — Ejecutar la policy de calibración:**
+**Terminal 4 — Ejecutar FTCalibrationSampler:**
 
 ```bash
 distrobox enter -r aic_eval
@@ -640,25 +500,81 @@ ros2 run aic_model aic_model --ros-args \
   -p policy:=aic_example_policies.ros.FTCalibrationSampler
 ```
 
-> **Importante:** La policy `FTCalibrationSampler` debe estar copiada al
-> workspace del contenedor antes de ejecutar:
-> ```bash
-> sudo cp aic_example_policies/aic_example_policies/ros/FTCalibrationSampler.py \
->   /ws_aic/install/lib/python3.12/site-packages/aic_example_policies/ros/
-> ```
+Señales esperadas en los logs:
+
+```
+[aic_model]: Goal accepted
+[aic_model]: FTCalibrationSampler.insert_cable() task=...cable_name='cable_0'...
+[aic_model]: --- OFFSET [1/9]: free_space dx=0.0mm  dy=0.0mm  z=0.120m ---
+[aic_model]: Manteniendo 'free_space' durante 30 s...
+[aic_model]: 'free_space' completado.
+[aic_model]: --- OFFSET [2/9]: y_plus_15mm dx=0.0mm  dy=15.0mm  z=0.002m ---
+...
+```
+
+El engine imprime `insert_cable execute loop` cada ~77 s (heartbeat).
+Parar con **Ctrl+C** en ambas terminales (3 y 4) cuando se hayan completado
+las fases deseadas o al final de la secuencia.
+
+---
+
+#### Alternativa — Docker puro (sin distrobox)
+
+Usar `docker/docker-compose.dataset_b.yaml`. **No requiere copiar la policy**
+manualmente — el servicio `tools` monta el source del repo directamente.
+
+```bash
+# Preparar directorio de salida
+mkdir -p ~/aic_bags
+
+# Levantar simulación + contenedor de herramientas
+BAGS_DIR=~/aic_bags \
+  docker compose -f docker/docker-compose.dataset_b.yaml up -d eval tools
+
+# Cada terminal (2, 3, 4) abre una shell en tools:
+docker exec -it aic_dataset_b-tools-1 bash
+```
+
+Desde esa shell los comandos son idénticos a los del flujo distrobox
+(sin el bloque prerequisito — ya configurado en el entrypoint):
+
+```bash
+# Terminal 2 — Tare
+ros2 service call /aic_controller/tare_force_torque_sensor std_srvs/srv/Trigger
+
+# Terminal 3 — Bag (va a /bags = ~/aic_bags en el host)
+ros2 bag record \
+  --topics \
+    /fts_broadcaster/wrench \
+    /joint_states \
+    /tf \
+    /tf_static \
+  -o /bags/ft_calib_$(date +%Y%m%d_%H%M%S)
+
+# Terminal 4 — FTCalibrationSampler
+ros2 run aic_model aic_model --ros-args \
+  -p use_sim_time:=true \
+  -p policy:=aic_example_policies.ros.FTCalibrationSampler
+```
+
+```bash
+# Detener todo al finalizar
+docker compose -f docker/docker-compose.dataset_b.yaml down
+```
+
+---
 
 **Post-procesamiento — extraer bag y calibrar:**
 
 ```bash
-# 1. Extraer el bag MCAP a CSV (dentro del contenedor)
-python tools/extract_eval_bags_to_csv.py /tmp/ft_calib_TIMESTAMP
+# 1. Extraer el bag MCAP a CSV (dentro del contenedor, usar python3)
+python3 tools/extract_eval_bags_to_csv.py /tmp/ft_calib_TIMESTAMP
 
-# 2. Calcular GAIN y BIAS (desde Windows/WSL, sin contenedor)
+# 2. Calcular GAIN y BIAS (desde Windows, sin contenedor)
 python tools/calibrate_ft.py \
   --calib extracted_eval_bags_csv/ft_calib_TIMESTAMP
 
-# El script combina los datos con los bag_trial_* anteriores
-# y exporta tools/calibration_results.csv con los valores finales.
+# Combina datos con bag_trial_* anteriores y exporta tools/calibration_results.csv
 ```
 
 ---
