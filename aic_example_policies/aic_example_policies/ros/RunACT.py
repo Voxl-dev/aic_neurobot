@@ -27,7 +27,9 @@ import draccus
 from pathlib import Path
 from typing import Callable, Dict, Any, List
 from rclpy.node import Node
+from rclpy.time import Time as RclpyTime
 from geometry_msgs.msg import Twist, Vector3
+from tf2_ros import Buffer, TransformException, TransformListener
 
 from aic_model.policy import (
     GetObservationCallback,
@@ -50,16 +52,25 @@ from lerobot.policies.act.configuration_act import ACTConfig
 from safetensors.torch import load_file
 from huggingface_hub import snapshot_download
 
+from aic_example_policies.ros.keypoint_step4 import (
+    KeypointEstimatorBank,
+    estimate_pose_relative_tcp_from_multiview,
+    pose_msg_to_mat4,
+    transform_stamped_to_mat4,
+)
+
 
 class RunACT(Policy):
     def __init__(self, parent_node: Node):
         super().__init__(parent_node)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.parent_node = parent_node
         camera_output_dir = os.environ.get("AIC_CAMERA_OUTPUT_DIR")
         self.camera_data_dir = (
             Path(camera_output_dir) if camera_output_dir else Path.cwd() / "aic_camera_data"
         )
         self.camera_frame_index = 0
+        self.step4_failure_count = 0
         for camera_name in ("left", "center", "right"):
             (self.camera_data_dir / camera_name).mkdir(parents=True, exist_ok=True)
         self.get_logger().info(f"Camera images will be saved to {self.camera_data_dir}")
@@ -128,6 +139,7 @@ class RunACT(Policy):
         self.state_std = get_stat("observation.state.std", (1, -1))
         print(f"Robot state mean: {self.state_mean}")
         print(f"Robot state std: {self.state_std}")
+        self.expected_state_dim = int(self.state_mean.shape[1])
 
         # Action Stats (1, 7) - Used for Un-normalization
         self.action_mean = get_stat("action.mean", (1, -1))
@@ -137,8 +149,60 @@ class RunACT(Policy):
 
         # Config
         self.image_scaling = 0.25  # Must match AICRobotAICControllerConfig
+        self.keypoint_step4_enabled = False
+        self.keypoint_estimator = None
+        self.tf_buffer = None
+        self.tf_listener = None
+        self._configure_keypoint_step4()
 
         self.get_logger().info("Normalization statistics loaded successfully.")
+
+    def _configure_keypoint_step4(self) -> None:
+        """Optionally enable keypoint -> pose_relative_tcp -> 32D state."""
+        enable_env = os.environ.get("AIC_ENABLE_KEYPOINT_STEP4", "1").lower()
+        if enable_env in ("0", "false", "no", "off"):
+            self.get_logger().info("Keypoint Step 4 disabled by AIC_ENABLE_KEYPOINT_STEP4.")
+            return
+
+        if self.expected_state_dim < 32:
+            self.get_logger().warn(
+                "Keypoint Step 4 is available but the loaded ACT normalizer expects "
+                f"{self.expected_state_dim} state dims, not 32. Running legacy state."
+            )
+            return
+
+        checkpoint_paths = {
+            "sfp": Path(
+                os.environ.get(
+                    "AIC_KEYPOINT_SFP_CHECKPOINT",
+                    "outputs/keypoint_estimator/sfp/best_sfp.pt",
+                )
+            ),
+            "sc": Path(
+                os.environ.get(
+                    "AIC_KEYPOINT_SC_CHECKPOINT",
+                    "outputs/keypoint_estimator/sc/best_sc.pt",
+                )
+            ),
+        }
+        self.keypoint_estimator = KeypointEstimatorBank(
+            checkpoint_paths=checkpoint_paths,
+            device=str(self.device),
+        )
+        available = self.keypoint_estimator.available_connector_types()
+        if not available:
+            self.get_logger().warn(
+                "Keypoint Step 4 expected a 32D state, but no keypoint checkpoints "
+                "were found. The last 6 state dims will be zero until checkpoints exist."
+            )
+        else:
+            self.get_logger().info(
+                f"Keypoint Step 4 loaded checkpoints for: {', '.join(available)}"
+            )
+
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self.parent_node)
+        self.keypoint_step4_enabled = True
 
     @staticmethod
     def _ros_image_to_numpy(raw_img) -> np.ndarray:
@@ -211,7 +275,88 @@ class RunACT(Policy):
 
         self.camera_frame_index += 1
 
-    def prepare_observations(self, obs_msg: Observation) -> Dict[str, torch.Tensor]:
+    def _lookup_camera_poses_in_base(self, obs_msg: Observation) -> Dict[str, np.ndarray]:
+        """Return camera optical frame poses in base_link, keyed by camera name."""
+        if self.tf_buffer is None:
+            return {}
+
+        camera_infos = {
+            "left": obs_msg.left_camera_info,
+            "center": obs_msg.center_camera_info,
+            "right": obs_msg.right_camera_info,
+        }
+        camera_poses = {}
+        for camera_name, camera_info in camera_infos.items():
+            frame_id = camera_info.header.frame_id
+            if not frame_id:
+                continue
+            try:
+                tf_msg = self.tf_buffer.lookup_transform(
+                    "base_link",
+                    frame_id,
+                    RclpyTime(),
+                )
+            except TransformException:
+                continue
+            camera_poses[camera_name] = transform_stamped_to_mat4(tf_msg)
+        return camera_poses
+
+    def _estimate_visual_pose_relative_tcp(
+        self,
+        obs_msg: Observation,
+        connector_type: str,
+    ) -> np.ndarray:
+        """Estimate 6D port pose in TCP frame from RGB keypoints.
+
+        Returns zeros when Step 4 is unavailable. This keeps runtime behavior
+        deterministic while the keypoint checkpoints are still being produced.
+        """
+        fallback = np.zeros(6, dtype=np.float32)
+        if not self.keypoint_step4_enabled or self.keypoint_estimator is None:
+            return fallback
+        if not self.keypoint_estimator.has_model(connector_type):
+            return fallback
+
+        images_rgb = {
+            "left": self._ros_image_to_numpy(obs_msg.left_image),
+            "center": self._ros_image_to_numpy(obs_msg.center_image),
+            "right": self._ros_image_to_numpy(obs_msg.right_image),
+        }
+        keypoints_by_camera = self.keypoint_estimator.predict_multicamera(
+            connector_type,
+            images_rgb,
+        )
+        camera_infos = {
+            "left": obs_msg.left_camera_info,
+            "center": obs_msg.center_camera_info,
+            "right": obs_msg.right_camera_info,
+        }
+        camera_poses = self._lookup_camera_poses_in_base(obs_msg)
+        tcp_in_base = pose_msg_to_mat4(obs_msg.controller_state.tcp_pose)
+
+        estimate = estimate_pose_relative_tcp_from_multiview(
+            keypoints_by_camera=keypoints_by_camera,
+            connector_type=connector_type,
+            camera_infos=camera_infos,
+            camera_in_base_by_camera=camera_poses,
+            tcp_in_base=tcp_in_base,
+        )
+        if estimate is None:
+            self.step4_failure_count += 1
+            if self.step4_failure_count <= 3 or self.step4_failure_count % 20 == 0:
+                self.get_logger().warn(
+                    "Keypoint Step 4 could not estimate pose_relative_tcp; "
+                    "using zeros for the 6 visual state dims."
+                )
+            return fallback
+
+        return estimate.pose_relative_tcp.astype(np.float32)
+
+    def prepare_observations(
+        self,
+        obs_msg: Observation,
+        task: Task = None,
+    ) -> Dict[str, torch.Tensor]:
         """Convert ROS Observation message into dictionary of normalized tensors."""
 
         # --- Process Cameras ---
@@ -240,11 +385,12 @@ class RunACT(Policy):
         }
 
         # --- Process Robot State ---
-        # Construct flat state vector (26 dims) matching training order
+        # Base proprioceptive state (26 dims), then optional Step 4 visual pose
+        # appends pose_relative_tcp [dx, dy, dz, dRx, dRy, dRz] to reach 32 dims.
         tcp_pose = obs_msg.controller_state.tcp_pose
         tcp_vel = obs_msg.controller_state.tcp_velocity
 
-        state_np = np.array(
+        base_state_np = np.array(
             [
                 # TCP Position (3)
                 tcp_pose.position.x,
@@ -270,6 +416,21 @@ class RunACT(Policy):
             ],
             dtype=np.float32,
         )
+
+        if self.expected_state_dim >= 32:
+            connector_type = "sfp"
+            if task is not None and task.port_type in ("sfp", "sc"):
+                connector_type = task.port_type
+            visual_pose_rel = self._estimate_visual_pose_relative_tcp(
+                obs_msg,
+                connector_type=connector_type,
+            )
+            state_np = np.concatenate([base_state_np, visual_pose_rel]).astype(np.float32)
+            if self.expected_state_dim > state_np.shape[0]:
+                pad = np.zeros(self.expected_state_dim - state_np.shape[0], dtype=np.float32)
+                state_np = np.concatenate([state_np, pad]).astype(np.float32)
+        else:
+            state_np = base_state_np
 
         # Normalize State
         raw_state_tensor = (
@@ -304,7 +465,7 @@ class RunACT(Policy):
                 continue
 
             self.save_camera_images(observation_msg)
-            obs_tensors = self.prepare_observations(observation_msg)
+            obs_tensors = self.prepare_observations(observation_msg, task=task)
 
             # 2. Model Inference
             with torch.inference_mode():

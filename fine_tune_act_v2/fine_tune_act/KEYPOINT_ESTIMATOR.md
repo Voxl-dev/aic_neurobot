@@ -74,6 +74,37 @@ pixi run python fine_tune_act_v2/fine_tune_act/scripts/predict_keypoints.py \
   --save_debug /tmp/keypoints_sfp.png
 ```
 
+## Paso 4: salida e integracion
+
+El codigo del paso 4 queda encapsulado en:
+
+```text
+aic_example_policies/aic_example_policies/ros/keypoint_step4.py
+```
+
+Flujo implementado:
+
+- Ejecuta el checkpoint de keypoints por camara (`left`, `center`, `right`).
+- Usa la geometria 3D conocida del puerto `sfp` o `sc`.
+- Resuelve PnP por camara para estimar `port_in_camera`.
+- Transforma cada estimacion a `base_link` usando TF.
+- Fusiona las tres estimaciones con pesos segun error de reproyeccion e inliers.
+- Convierte el resultado a `pose_relative_tcp = [dx, dy, dz, dRx, dRy, dRz]`.
+- En `RunACT.py`, concatena esos 6 valores al estado proprioceptivo de 26D para formar el estado 32D.
+
+Variables de entorno utiles en runtime:
+
+```bash
+AIC_ENABLE_KEYPOINT_STEP4=1
+AIC_KEYPOINT_SFP_CHECKPOINT=outputs/keypoint_estimator/sfp/best_sfp.pt
+AIC_KEYPOINT_SC_CHECKPOINT=outputs/keypoint_estimator/sc/best_sc.pt
+```
+
+La integracion es defensiva: si el checkpoint no existe, si TF no entrega la
+pose de camara, o si el checkpoint ACT cargado todavia espera un estado de 26D,
+`RunACT` no se cae. En ese caso usa el estado legacy o rellena los 6 valores
+visuales con ceros hasta que el entrenamiento/fine-tune 32D este listo.
+
 ## Criterio minimo antes de integrar con ACT
 
 Para que esta capa sea util, no basta con que la loss baje. Debemos mirar:
