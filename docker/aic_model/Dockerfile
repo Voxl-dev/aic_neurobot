@@ -68,8 +68,8 @@ ENV AIC_BAYESIAN_DIR=/opt/aic/bayesiano
 # Resolución de imágenes: debe coincidir con la resolución usada en entrenamiento.
 # Si se entrenó con train_act_fast.py (--fast): 240x320
 # Si se entrenó full (lerobot-train, 480x640): cambiar a 480 y 640
-ENV AIC_IMG_H=240
-ENV AIC_IMG_W=320
+ENV AIC_IMG_H=480
+ENV AIC_IMG_W=640
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
 WORKDIR /ws_aic/src/aic

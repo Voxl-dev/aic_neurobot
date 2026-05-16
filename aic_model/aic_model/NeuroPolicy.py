@@ -4,6 +4,16 @@ Production ACT insertion policy for AIC Challenge.
 ACT handles ALL motion (approach + insertion). InsertionFSM detects states
 (CONTACT, EXPLORE, SUCCESS, RETRACT). BayesianEstimator drives FSM confidence.
 
+State vector layout (32D) — step4_pose, must match bag_to_lerobot.py:
+  [0:3]   tcp_pos          (m, base_link)
+  [3:7]   tcp_quat         (x,y,z,w, base_link)
+  [7:10]  tcp_lin_vel      (m/s)
+  [10:13] tcp_ang_vel      (rad/s)
+  [13:19] zeros            (tcp_error unavailable in training bags)
+  [19:25] arm_joints       (rad)
+  [25]    gripper          (m)
+  [26:32] pose_relative_tcp (Step4 PnP + multiview fusion, 6D)
+
 Env vars:
   AIC_POLICY_CHECKPOINT  Dir with ACT checkpoint (config.json + model.safetensors)
                          Default: models/act_policy
@@ -11,13 +21,14 @@ Env vars:
                          Default: models/keypoints/best_sc.pt
   AIC_KP_SFP             SFP keypoint checkpoint .pt
                          Default: models/keypoints/best_sfp.pt
-  AIC_IMG_H              Image height fed to ACT (must match training)  Default: 240
-  AIC_IMG_W              Image width fed to ACT  (must match training)  Default: 320
+  AIC_IMG_H              Image height fed to ACT (must match training)  Default: 480
+  AIC_IMG_W              Image width fed to ACT  (must match training)  Default: 640
 """
 
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -29,7 +40,11 @@ from std_msgs.msg import Header
 from aic_control_interfaces.msg import MotionUpdate, TrajectoryGenerationMode
 from aic_model.bayesian_estimator import Axia80BayesianEstimator
 from aic_model.insertion_state_machine import InsertionFSM, State
-from aic_model.keypoint_step4 import KeypointEstimatorBank
+from aic_model.keypoint_step4 import (
+    KeypointEstimatorBank,
+    estimate_pose_relative_tcp_from_multiview,
+    translation_quaternion_to_mat4,
+)
 from aic_model.policy import (
     GetObservationCallback,
     MoveRobotCallback,
@@ -37,6 +52,18 @@ from aic_model.policy import (
     SendFeedbackCallback,
 )
 from aic_task_interfaces.msg import Task
+
+_DEFAULT_CAMERA_K = [
+    1236.6316680908203, 0.0, 576.0,
+    0.0, 1236.6314697265625, 512.0,
+    0.0, 0.0, 1.0,
+]
+_DEFAULT_CAMERA_D = [0.0, 0.0, 0.0, 0.0, 0.0]
+_CAMERA_OPTICAL_FRAMES = {
+    "left":   "left_camera/optical",
+    "center": "center_camera/optical",
+    "right":  "right_camera/optical",
+}
 
 
 def _import_act_classes():
@@ -66,8 +93,28 @@ class NeuroPolicy(Policy):
         super().__init__(parent_node)
 
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self._img_h  = int(os.environ.get("AIC_IMG_H", "240"))
-        self._img_w  = int(os.environ.get("AIC_IMG_W", "320"))
+        self._img_h  = int(os.environ.get("AIC_IMG_H", "480"))
+        self._img_w  = int(os.environ.get("AIC_IMG_W", "640"))
+
+        # TF buffer for camera optical frame → base_link lookups
+        try:
+            import tf2_ros
+            self._tf_buffer   = tf2_ros.Buffer()
+            self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+        except Exception as e:
+            self.get_logger().warn(f"TF listener not available ({e}); step4 will use zeros")
+            self._tf_buffer = None
+
+        # Hardcoded camera intrinsics matching AIC simulation (1024×1152 sensor)
+        self._camera_infos = {}
+        for cam, frame in _CAMERA_OPTICAL_FRAMES.items():
+            self._camera_infos[cam] = SimpleNamespace(
+                header=SimpleNamespace(frame_id=frame),
+                height=1024, width=1152,
+                distortion_model="plumb_bob",
+                d=list(_DEFAULT_CAMERA_D),
+                k=list(_DEFAULT_CAMERA_K),
+            )
 
         ckpt_dir = Path(os.environ.get("AIC_POLICY_CHECKPOINT", "models/act_policy"))
         self.get_logger().info(f"NeuroPolicy: loading ACT from {ckpt_dir}")
@@ -150,31 +197,90 @@ class NeuroPolicy(Policy):
             raw_img.height, raw_img.width, 3
         )
 
-    def _build_state(self, obs, connector_type: str) -> np.ndarray:
-        """Build 32D state vector matching bag_to_lerobot.py format.
+    def _get_camera_poses_in_base(self) -> dict:
+        """TF lookup: camera optical frames → base_link as 4×4 matrices."""
+        if self._tf_buffer is None:
+            return {}
+        import rclpy.time
+        poses = {}
+        for cam, frame in _CAMERA_OPTICAL_FRAMES.items():
+            try:
+                t = self._tf_buffer.lookup_transform(
+                    "base_link", frame, rclpy.time.Time()
+                )
+                tr  = t.transform.translation
+                rot = t.transform.rotation
+                poses[cam] = translation_quaternion_to_mat4(
+                    [tr.x, tr.y, tr.z],
+                    [rot.x, rot.y, rot.z, rot.w],
+                )
+            except Exception:
+                pass
+        return poses
 
-        Layout: [arm_joints×6 | gripper×1 | kp_norm_flat×18 | tcp_pos×3 | tcp_quat×4]
+    def _compute_step4_pose(self, obs, connector_type: str) -> np.ndarray:
+        """Run Step4 PnP on all 3 cameras → pose_relative_tcp [6D].
+        Returns zeros on failure (matches training fallback).
         """
-        arm  = np.array(obs.joint_states.position[:6], dtype=np.float32)
-        grip = float(obs.joint_states.position[6]) if len(obs.joint_states.position) > 6 else 0.0
+        images = {
+            "left":   self._raw_rgb(obs.left_image),
+            "center": self._raw_rgb(obs.center_image),
+            "right":  self._raw_rgb(obs.right_image),
+        }
+        keypoints_by_camera = {}
+        for cam, img in images.items():
+            kp_px = self._kp.predict(connector_type, img)
+            if kp_px is not None:
+                keypoints_by_camera[cam] = kp_px
 
-        center_rgb = self._raw_rgb(obs.center_image)
-        kp = self._kp.predict(connector_type, center_rgb)
-        if kp is None:
-            kp = np.zeros((9, 2), dtype=np.float32)
-
-        # Normalize keypoint pixel coords to [0, 1]
-        kp_norm = kp.copy()
-        kp_norm[:, 0] /= max(float(obs.center_image.width),  1.0)
-        kp_norm[:, 1] /= max(float(obs.center_image.height), 1.0)
+        camera_in_base = self._get_camera_poses_in_base()
 
         p = obs.controller_state.tcp_pose.position
         q = obs.controller_state.tcp_pose.orientation
+        tcp_in_base = translation_quaternion_to_mat4(
+            [p.x, p.y, p.z], [q.x, q.y, q.z, q.w]
+        )
+
+        try:
+            estimate = estimate_pose_relative_tcp_from_multiview(
+                keypoints_by_camera=keypoints_by_camera,
+                connector_type=connector_type,
+                camera_infos=self._camera_infos,
+                camera_in_base_by_camera=camera_in_base,
+                tcp_in_base=tcp_in_base,
+            )
+            if estimate is not None:
+                return estimate.pose_relative_tcp.astype(np.float32)
+        except Exception as ex:
+            self.get_logger().warn(f"step4 pose failed: {ex}")
+        return np.zeros(6, dtype=np.float32)
+
+    def _build_state(self, obs, connector_type: str) -> np.ndarray:
+        """Build 32D state vector — step4_pose layout (matches bag_to_lerobot.py).
+
+        [0:3]   tcp_pos  [3:7] tcp_quat  [7:10] lin_vel  [10:13] ang_vel
+        [13:19] zeros (tcp_error not in training)
+        [19:25] arm_joints  [25] gripper
+        [26:32] pose_relative_tcp (Step4)
+        """
+        p = obs.controller_state.tcp_pose.position
+        q = obs.controller_state.tcp_pose.orientation
+        v = obs.controller_state.tcp_velocity.linear
+        w = obs.controller_state.tcp_velocity.angular
+
+        arm  = np.array(obs.joint_states.position[:6], dtype=np.float32)
+        grip = float(obs.joint_states.position[6]) if len(obs.joint_states.position) > 6 else 0.0
+
+        pose_rel = self._compute_step4_pose(obs, connector_type)
+
         return np.concatenate([
-            arm, [grip],
-            kp_norm.flatten(),
             [p.x, p.y, p.z],
             [q.x, q.y, q.z, q.w],
+            [v.x, v.y, v.z],
+            [w.x, w.y, w.z],
+            np.zeros(6, dtype=np.float32),  # tcp_error: always zeros (matches training)
+            arm, [grip],
+            pose_rel,
         ]).astype(np.float32)
 
     def _img_tensor(self, raw_img) -> torch.Tensor:
